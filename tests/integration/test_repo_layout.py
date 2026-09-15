@@ -31,6 +31,8 @@ REQUIRED_FILES = [
     "mql5/Include/XARE/StructureEngine.mqh",
     "mql5/Include/XARE/SessionEngine.mqh",
     "mql5/Include/XARE/LiquidityEngine.mqh",
+    "mql5/Include/XARE/SignalEngine.mqh",
+    "mql5/Include/XARE/ScoreEngine.mqh",
 ]
 
 
@@ -135,3 +137,34 @@ def test_regime_uses_all_spec9_regimes():
         assert token in types_src
     eng = (REPO / "mql5/Include/XARE/RegimeEngine.mqh").read_text(encoding="utf-8")
     assert "not a probability" in eng or "NOT a probability" in eng
+
+
+def test_no_trade_paths_exist():
+    """M1+ invariant: the EA must contain zero order-execution APIs so far."""
+    import re
+    for p in (REPO / "mql5").rglob("*.mq5"):
+        src = p.read_text(encoding="utf-8", errors="replace")
+        assert not re.search(r"OrderSend|CTrade|PositionOpen|PositionClose|"
+                             r"PositionModify", src), f"trade path in {p.name}"
+    for p in (REPO / "mql5/Include/XARE").rglob("*.mqh"):
+        src = p.read_text(encoding="utf-8", errors="replace")
+        assert not re.search(r"OrderSend|CTrade|PositionOpen|PositionClose|"
+                             r"PositionModify", src), f"trade path in {p.name}"
+
+
+def test_score_weights_sum_to_100_in_config():
+    """M8: scoring weights must total 100 and bands must be ordered."""
+    import re
+    src = (REPO / "mql5/Include/XARE/Config.mqh").read_text(encoding="utf-8")
+
+    def grab(name):
+        m = re.search(rf"c\.{name}\s*=\s*([0-9.]+)\s*;", src)
+        assert m, f"{name} not found in Config.mqh"
+        return float(m.group(1))
+
+    weights = [grab(k) for k in ("w_trend", "w_mtf", "w_structure", "w_momentum",
+                                 "w_liquidity", "w_volatility", "w_session", "w_setup")]
+    assert abs(sum(weights) - 100.0) < 0.01, f"weights sum {sum(weights)}"
+    bands = [grab(k) for k in ("score_min", "score_candidate", "score_trade",
+                               "score_strong")]
+    assert bands == sorted(bands), f"bands not ordered: {bands}"

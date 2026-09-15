@@ -1,9 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                                     XARE.mq5     |
-//|        XARE — XAUUSD Adaptive Risk Engine  (v0.6.0, M2–M6)       |
+//|        XARE — XAUUSD Adaptive Risk Engine  (v0.8.0, M7–M8)       |
 //|                                                                  |
 //| Data/feature/context layers live: market data, indicators, MTF,  |
 //| regime, structure, session, liquidity — all on closed bars.      |
+//| M7 signal engine (6 setups + NO_TRADE reasons) and M8 scoring    |
+//| (0–100 weighted breakdown) are wired.                            |
 //| Still NO trading paths — engines evaluate and log only.          |
 //| Modes (default SIGNAL_ONLY — never default to trading):          |
 //|   RESEARCH  : future home of feature CSV export                  |
@@ -17,7 +19,7 @@
 #property link        "https://github.com/jaHxii/XARE-Trading-System"
 #property version     "1.00"  // display-only: this compiler rejects 0.x majors (warning 68).
                                      // Authoritative version: v0.1.0 — see docs/changelog.md + git tag.  // x.yy format required by MetaEditor; semver v0.1.0 in changelog/tag
-#property description "XARE — XAUUSD Adaptive Risk Engine (research build, M1)"
+#property description "XARE — XAUUSD Adaptive Risk Engine (research build, M8)"
 
 #include <XARE\Types.mqh>
 #include <XARE\Config.mqh>
@@ -31,6 +33,7 @@
 #include <XARE\SessionEngine.mqh>
 #include <XARE\LiquidityEngine.mqh>
 #include <XARE\SignalEngine.mqh>
+#include <XARE\ScoreEngine.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -65,6 +68,20 @@ input double         InpPullbackZoneATR = 1.2;                   // Pullback zon
 input double         InpMinSetupConf    = 55.0;                  // Min setup confidence
 input int            InpRetestValidBars = 8;                     // Retest window (bars)
 
+input group  "Scoring (v0.8: hypotheses, see docs/parameters.md)"
+input double         InpWTrend          = 20.0;                  // Weight: trend (max 20)
+input double         InpWMTF            = 15.0;                  // Weight: MTF alignment (max 15)
+input double         InpWStructure      = 15.0;                  // Weight: structure (max 15)
+input double         InpWMomentum       = 10.0;                  // Weight: momentum (max 10)
+input double         InpWLiquidity      = 15.0;                  // Weight: liquidity (max 15)
+input double         InpWVolatility     = 10.0;                  // Weight: volatility (max 10)
+input double         InpWSession        = 5.0;                   // Weight: session (max 5)
+input double         InpWSetup          = 10.0;                  // Weight: setup quality (max 10)
+input double         InpScoreMin        = 60.0;                  // Band floor: below = no trade
+input double         InpScoreCandidate  = 70.0;                  // Band: candidate from
+input double         InpScoreTrade      = 80.0;                  // Band: trade from
+input double         InpScoreStrong     = 85.0;                  // Band: strong from
+
 input group  "Logging"
 input int            InpLogLevel        = 1;                     // 0=DEBUG 1=INFO 2=WARN 3=ERROR
 input bool           InpJournalCSV      = true;                  // Enable trade journal CSV
@@ -81,10 +98,15 @@ CXareStructureEngine g_struct;
 CXareSessionEngine  g_sess;
 CXareLiquidityEngine g_liq;
 CXareSignalEngine   g_sig;
+CXareScoreEngine    g_score;
 
 //--- last bar decision (for dashboard; signal-only — nothing is executed)
 SXareDecision     g_last_decision;
+SXareScore        g_last_score;
 bool              g_have_decision = false;
+bool              g_have_score    = false;
+SXareRegime       g_last_regime;
+bool              g_have_regime   = false;
 
 //--- runtime state
 string            g_symbol;
@@ -227,6 +249,20 @@ int OnInit()
    g_cfg.min_setup_confidence           = InpMinSetupConf;
    g_cfg.retest_valid_bars              = InpRetestValidBars;
 
+   // M8: scoring weights + bands (hypotheses — docs/parameters.md)
+   g_cfg.w_trend                 = InpWTrend;
+   g_cfg.w_mtf                   = InpWMTF;
+   g_cfg.w_structure             = InpWStructure;
+   g_cfg.w_momentum              = InpWMomentum;
+   g_cfg.w_liquidity             = InpWLiquidity;
+   g_cfg.w_volatility            = InpWVolatility;
+   g_cfg.w_session               = InpWSession;
+   g_cfg.w_setup                 = InpWSetup;
+   g_cfg.score_min               = InpScoreMin;
+   g_cfg.score_candidate         = InpScoreCandidate;
+   g_cfg.score_trade             = InpScoreTrade;
+   g_cfg.score_strong            = InpScoreStrong;
+
    // 2) logger
    if(!g_log.Init(g_symbol, g_cfg.magic, g_cfg.log_level,
                   g_cfg.journal_csv_enabled, g_cfg.journal_dir))
@@ -242,7 +278,7 @@ int OnInit()
       default:         g_tf_label=EnumToString(_Period);
      }
 
-   g_log.Info("INIT", StringFormat("XARE v0.7.0 starting | mode=%s trading=%s symbol=%s tf=%s",
+   g_log.Info("INIT", StringFormat("XARE v0.8.0 starting | mode=%s trading=%s symbol=%s tf=%s",
               XareModeToString(g_cfg.mode),
               g_cfg.trading_enabled?"ON":"OFF", g_symbol, g_tf_label));
 
@@ -292,14 +328,26 @@ int OnInit()
       g_ind.Release();
       return INIT_FAILED;
      }
+   // M8: score-weight sanity — weights must sum to 100 (§16) or init fails
+   if(!XareWeightsValid(g_cfg.w_trend, g_cfg.w_mtf, g_cfg.w_structure,
+                        g_cfg.w_momentum, g_cfg.w_liquidity, g_cfg.w_volatility,
+                        g_cfg.w_session, g_cfg.w_setup))
+     {
+      g_log.Error("INIT", "scoring weights must sum to 100 — refusing to start");
+      g_mtf.Release();
+      g_ind.Release();
+      return INIT_PARAMETERS_INCORRECT;
+     }
+
    g_sig.Init(g_cfg);   // pure engine; cannot fail
+   g_score.Init(g_cfg); // pure engine; cannot fail
    SXareSymbolProps props;
    g_md.GetProps(props);
    g_log.Info("INIT", StringFormat("engines ready | props.valid=%s min_history=%d mtf=H4+H1+%s",
               props.valid ? "true" : "false", g_cfg.history_bars_min, g_tf_label));
 
    // 6) dashboard
-   g_ui.Init(g_cfg.dashboard_enabled, "v0.6.0");
+   g_ui.Init(g_cfg.dashboard_enabled, "v0.8.0");
 
    g_init_ok = true;
    g_log.Info("INIT", "initialization complete (M2-M6 context engines live, no trading)");
@@ -497,7 +545,47 @@ void RunSelfTest()
    double n1 = NormalizeDouble(MathRound(123.478/0.05)*0.05, 2);  // expect 123.50
    if(MathAbs(n1 - 123.50) > 1e-9)                            { failed++; Print("SELFTEST FAIL T4 tick-grid"); }
 
-   if(failed==0) Print("XARE SELF-TEST: PASS (10 groups)");
+   // T11 (M8): weight-sum validator + band classifier edges ----------------
+   if(!XareWeightsValid(20,15,15,10,15,10,5,10))  { failed++; Print("SELFTEST FAIL T11 weights-valid"); }
+   if(XareWeightsValid(25,15,15,10,15,10,5,10))   { failed++; Print("SELFTEST FAIL T11 weights-reject"); }
+   if(XareScoreBand(55, 60,70,80,85) != XARE_BAND_NONE)      { failed++; Print("SELFTEST FAIL T11 band none"); }
+   if(XareScoreBand(65, 60,70,80,85) != XARE_BAND_CANDIDATE) { failed++; Print("SELFTEST FAIL T11 band candidate"); }
+   if(XareScoreBand(75, 60,70,80,85) != XARE_BAND_TRADE)     { failed++; Print("SELFTEST FAIL T11 band trade"); }
+   if(XareScoreBand(90, 60,70,80,85) != XARE_BAND_STRONG)    { failed++; Print("SELFTEST FAIL T11 band strong"); }
+
+   // T12 (M8): pure score engine on the T9 synthetic context ---------------
+   SXareDecision d12; d12.has_signal=true; d12.direction=1;
+                     d12.setup=XARE_SETUP_TREND_PULLBACK; d12.setup_confidence=100.0;
+                     d12.entry_lo=2038; d12.entry_hi=2046; d12.bar_time=0;
+                     d12.invalidation="x"; d12.evidence="t"; d12.nt_reason=XARE_NT_NONE;
+   CXareScoreEngine scT;
+   SXareScore s12;
+   // aligned everything: trend 20, mtf 15, structure 10.5 (bull trend, no BOS),
+   // momentum 10 (roc .5>0>.25, rsi 55), liquidity 0, volatility 10 (pct 50),
+   // session 3.5 (LONDON), setup 10 ⇒ 79 = TRADE band
+   if(!scT.Score(d12, ft, mt, stp, lq, XARE_SESS_LONDON, 50.0, s12) ||
+      MathAbs(s12.total - 79.0) > 0.01 ||
+      XareScoreBand(s12.total, 60,70,80,85) != XARE_BAND_TRADE)
+      { failed++; Print("SELFTEST FAIL T12 aligned-score"); }
+   // counter-trend setup: trend component drops to 25% ⇒ 64 = CANDIDATE
+   SXareDecision d12b = d12; d12b.setup = XARE_SETUP_RANGE_REVERSAL;
+   SXareScore s12b;
+   scT.Score(d12b, ft, mt, stp, lq, XARE_SESS_LONDON, 50.0, s12b);
+   if(MathAbs(s12b.total - 64.0) > 0.01 ||
+      XareScoreBand(s12b.total, 60,70,80,85) != XARE_BAND_CANDIDATE)
+      { failed++; Print("SELFTEST FAIL T12 counter-trend"); }
+   // MIXED alignment zeroes the MTF component ⇒ conflict always costs points
+   SXareScore s12c;
+   scT.Score(d12, ft, mt_mix, stp, lq, XARE_SESS_LONDON, 50.0, s12c);
+   if(s12c.mtf.earned != 0.0 || MathAbs(s12c.total - 64.0) > 0.01)
+      { failed++; Print("SELFTEST FAIL T12 mixed-zero-mtf"); }
+   // no-signal decision is not scoreable
+   SXareDecision d12d = d12; d12d.has_signal = false;
+   SXareScore s12d;
+   if(scT.Score(d12d, ft, mt, stp, lq, XARE_SESS_LONDON, 50.0, s12d))
+      { failed++; Print("SELFTEST FAIL T12 no-signal-not-scored"); }
+
+   if(failed==0) Print("XARE SELF-TEST: PASS (12 groups)");
    else          Print("XARE SELF-TEST: FAIL (", failed, " checks)");
   }
 
@@ -590,6 +678,8 @@ void ProcessBar()
    if(g_liq.Evaluate(1, session, f.atr, liq) && liq.valid)
       g_log.Info("LIQ", liq.evidence);
 
+   // --- M8: capture regime for scoring + dashboard ------------------------
+   double atr_pct = g_regime.LastATRPercentile();
    // --- M7: signal evaluation on the same closed-bar context ----------
    double prev_roc = 0.0;
    double c_now  = iClose(g_symbol, _Period, 1);
@@ -602,19 +692,51 @@ void ProcessBar()
    g_last_decision = decision;
    g_have_decision = true;
 
-   // signal-only output: the DECISION line for every new M15 candle
-   if(decision.has_signal)
+   // --- M8: score the decision (0–100, every component logged) -----------
+   bool have_score = false;
+   SXareScore score;
+   if(decision.has_signal &&
+      g_score.Score(decision, f, mtf, structure, liq, session.session, atr_pct, score))
+     {
+      have_score = true;
+      g_last_score  = score;
+      g_have_score  = true;
+      g_last_regime = regime;
+      g_have_regime = true;
+      ENUM_XARE_SCORE_BAND band = XareScoreBand(score.total, g_cfg.score_min,
+                                                g_cfg.score_candidate,
+                                                g_cfg.score_trade,
+                                                g_cfg.score_strong);
+      string band_s = XareScoreBandToString(band);
+      g_log.Info("SCORE", StringFormat(
+         "total=%.1f [%s] | trend=%.1f/%.0f mtf=%.1f/%.0f structure=%.1f/%.0f momentum=%.1f/%.0f liquidity=%.1f/%.0f volatility=%.1f/%.0f session=%.1f/%.0f setup=%.1f/%.0f",
+         score.total, band_s,
+         score.trend.earned, score.trend.max,
+         score.mtf.earned, score.mtf.max,
+         score.structure.earned, score.structure.max,
+         score.momentum.earned, score.momentum.max,
+         score.liquidity.earned, score.liquidity.max,
+         score.volatility.earned, score.volatility.max,
+         score.session.earned, score.session.max,
+         score.setup.earned, score.setup.max));
+
+      // signal-only output: the DECISION line for every new M15 candle
       g_log.Info("DECISION", StringFormat(
-         "%s %s conf=%.0f entry[%s..%s] | %s | invalidation: %s",
+         "%s %s conf=%.0f score=%.1f [%s] entry[%s..%s] | %s | invalidation: %s",
          decision.direction > 0 ? "BUY" : "SELL",
          XareSetupToString(decision.setup), decision.setup_confidence,
+         score.total, band_s,
          DoubleToString(decision.entry_lo, props.digits),
          DoubleToString(decision.entry_hi, props.digits),
          decision.evidence, decision.invalidation));
+     }
    else
+     {
+      // NO_TRADE path — score is not applicable; report the reason instead
       g_log.Info("DECISION", StringFormat(
          "NO_TRADE (%s) | %s",
          XareNoTradeToString(decision.nt_reason), decision.evidence));
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -642,7 +764,7 @@ void OnTick()
    double price       = SymbolInfoDouble(g_symbol, SYMBOL_BID);
    int    spread_pts  = g_md.CurrentSpreadPoints();
    SXareFeatures feat;
-   bool have_feat = g_ind.Last(feat);
+   g_ind.Last(feat);   // refresh cache; liveness already shown via regime/score
    string decision_txt = "NO_DECISION";
    if(g_have_decision)
       decision_txt = g_last_decision.has_signal
@@ -652,9 +774,19 @@ void OnTick()
    int    open_xare   = 0;   // PositionManager counts by magic from M11
    double daily_pl    = 0.0;   // RiskEngine from M9
    double dd_pct      = 0.0;   // RiskEngine from M9
+   double ui_score    = 0.0;
+   string ui_regime   = "UNKNOWN";
+   int    ui_conf     = 0;
+   if(g_have_score)
+      ui_score = g_last_score.total;
+   if(g_have_regime)
+     {
+      ui_regime = XareRegimeToString(g_last_regime.regime);
+      ui_conf   = g_last_regime.confidence;
+     }
 
    g_ui.Update(g_symbol, g_tf_label, g_cfg.mode, price, spread_pts,
-               have_feat ? "FEATURES_OK" : "UNKNOWN", 0, decision_txt, 0.0,
+               ui_regime, ui_conf, decision_txt, ui_score,
                XareRiskStateToString(XARE_RISK_NORMAL),
                daily_pl, dd_pct, open_xare, "N/A",
                /*trading_allowed=*/false);

@@ -47,6 +47,7 @@ private:
    SXareConfig      m_cfg;
    int              m_atr_period;
    SXareRegime      m_last;
+   double           m_last_atr_pct;   // percentile from the last Evaluate (-1 if n/a)
    CXareLogger     *m_log;
 
    //--- ATR percentile of current bar vs the prior 'window' bars (0..100).
@@ -105,7 +106,8 @@ public:
    int              m_h_atr;         // borrowed ATR handle (owned by Indicators)
 
                      CXareRegimeEngine(void) : m_symbol(""), m_tf(PERIOD_CURRENT),
-                                               m_h_atr(INVALID_HANDLE), m_log(NULL)
+                                               m_h_atr(INVALID_HANDLE),
+                                               m_last_atr_pct(-1.0), m_log(NULL)
      {
       ZeroMemory(m_last);
      }
@@ -152,6 +154,7 @@ public:
 
       double atr_pct = 50.0;
       bool vol_ok = ATRPercentile(m_symbol, m_tf, shift, 200, atr_pct);
+      m_last_atr_pct = vol_ok ? atr_pct : -1.0;
       bool vol_high = vol_ok && (atr_pct >= m_cfg.high_vol_atr_pct);
       bool vol_low  = vol_ok && (atr_pct <= m_cfg.low_vol_atr_pct);
 
@@ -217,6 +220,9 @@ public:
       out = m_last;
       return true;
      }
+
+   //--- ATR percentile from the last Evaluate (-1 = unavailable)
+   double            LastATRPercentile(void) const { return m_last_atr_pct; }
   };
 
 #endif // __XARE_REGIMEENGINE_MQH__

@@ -28,8 +28,6 @@ contains no trade paths.
 | `StructureEngine.mqh` | Swings, HH/HL/LH/LL, BOS/CHoCH, S/R zones | MarketData | structure verdict |
 | `SessionEngine.mqh` | Asian/London/NY/overlap windows in broker time + episode H/L | MarketData, Config | session verdict |
 | `LiquidityEngine.mqh` | PDH/PDL, session H/L, swing extremes; objective sweep/false-break events | MarketData, SessionEngine | liquidity events |
-| `LiquidityEngine.mqh` | PDH/PDL, session H/L, sweep/false-break detection | MarketData, SessionEngine | liquidity state |
-| `SessionEngine.mqh` | Asian/London/NY/overlap windows in broker time | MarketData | session verdict |
 | `SignalEngine.mqh` | 6 setup detectors; returns setup or NO_TRADE | Regime, Structure, Liquidity, Session | candidate setups |
 | `ScoreEngine.mqh` | 0–100 weighted score + component breakdown | all above | score + evidence |
 | `RiskEngine.mqh` | Sizing, exposure caps, loss limits, drawdown states, streaks | Config, account, journal | permission + volume |

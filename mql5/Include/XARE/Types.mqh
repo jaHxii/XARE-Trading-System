@@ -240,6 +240,15 @@ enum ENUM_XARE_SAFETY_VERDICT
    XARE_SAFETY_BLOCK         // reason string mandatory when blocked
   };
 
+//--- score bands (spec §16); thresholds are configurable hypotheses
+enum ENUM_XARE_SCORE_BAND
+  {
+   XARE_BAND_NONE = 0,       // below minimum — no trade
+   XARE_BAND_CANDIDATE,      // acceptable
+   XARE_BAND_TRADE,          // trade candidate
+   XARE_BAND_STRONG          // high-quality candidate
+  };
+
 //--- per-component score contribution (spec §16); weights are hypotheses
 struct SXareScoreComponent
   {
@@ -471,6 +480,17 @@ string XareSessionToString(const ENUM_XARE_SESSION s)
       case XARE_SESS_NEWYORK: return "NEWYORK";
       case XARE_SESS_OVERLAP: return "OVERLAP";
       default:                return "OFF";
+     }
+  }
+
+string XareScoreBandToString(const ENUM_XARE_SCORE_BAND b)
+  {
+   switch(b)
+     {
+      case XARE_BAND_CANDIDATE: return "CANDIDATE";
+      case XARE_BAND_TRADE:     return "TRADE";
+      case XARE_BAND_STRONG:    return "STRONG";
+      default:                  return "NONE";
      }
   }
 

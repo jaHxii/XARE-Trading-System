@@ -4,6 +4,32 @@ All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).
 
+## [v0.8.0] — 2026-09-15 (M8)
+
+### Added
+- `ScoreEngine.mqh`: pure 0–100 weighted score with a full component
+  breakdown (trend/mtf/structure/momentum/liquidity/volatility/session/setup,
+  each earned-vs-max with a note) and band classification
+  (NONE / CANDIDATE / TRADE / STRONG). The score is NOT a probability.
+- Documented conflict policy: MIXED alignment scores 0 on the MTF component;
+  counter-trend setups (range/sweep reversal) earn trend points only at a
+  reduced 25% credit — conflicts always cost points.
+- Volatility component driven by the regime engine's ATR percentile
+  (exposed via `RegimeEngine.LastATRPercentile()`), not recomputed.
+- Config: 8 weights (sum must equal 100 — enforced at init, EA refuses to
+  start otherwise) + 4 band thresholds, all exposed as EA inputs.
+- EA: SCORE log line with every component; DECISION line now carries
+  score + band; dashboard shows the live score and regime label/confidence.
+- SELF_TEST groups T11 (weight validator, band edges) and T12 (exact
+  component arithmetic: aligned pullback = 79, counter-trend = 64,
+  MIXED zeroes MTF, no-signal not scoreable).
+- Python contract tests mirroring T11/T12 (15 tests).
+
+### Verified
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_m8.log`).
+- Python suite: 41 passed.
+- No-trade audit: no OrderSend/CTrade/position-modify paths (grep-verified).
+
 ## [v0.7.0] — 2026-09-15 (M7)
 
 ### Added

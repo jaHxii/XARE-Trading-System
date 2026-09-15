@@ -73,6 +73,20 @@ struct SXareConfig
    double           min_setup_confidence;  // setup-level floor (0..100)
    int              retest_valid_bars;     // break must be recent to retest
 
+   // Scoring (§16). Weights are INITIAL HYPOTHESES (sum 100), docs/parameters.md.
+   double           w_trend;             // 20
+   double           w_mtf;               // 15
+   double           w_structure;         // 15
+   double           w_momentum;          // 10
+   double           w_liquidity;         // 15
+   double           w_volatility;        // 10
+   double           w_session;           // 5
+   double           w_setup;             // 10
+   double           score_min;           // below ⇒ no trade
+   double           score_candidate;     // candidate band from
+   double           score_trade;         // trade band from
+   double           score_strong;        // strong band from
+
    // Logging / Research (§34, §37)
    int              log_level;            // 0=DEBUG 1=INFO 2=WARN 3=ERROR
    bool             research_csv_enabled; // RESEARCH mode feature rows
@@ -139,6 +153,20 @@ void XareConfigDefaults(SXareConfig &c)
    c.pullback_ema_zone_atr    = 1.2;
    c.min_setup_confidence     = 55.0;
    c.retest_valid_bars        = 8;
+
+   // Scoring weights + bands: hypotheses (docs/parameters.md)
+   c.w_trend                 = 20.0;
+   c.w_mtf                   = 15.0;
+   c.w_structure             = 15.0;
+   c.w_momentum              = 10.0;
+   c.w_liquidity             = 15.0;
+   c.w_volatility            = 10.0;
+   c.w_session               = 5.0;
+   c.w_setup                 = 10.0;
+   c.score_min               = 60.0;
+   c.score_candidate         = 70.0;
+   c.score_trade             = 80.0;
+   c.score_strong            = 85.0;
 
    c.log_level              = 1;      // INFO
    c.research_csv_enabled   = false;  // enabled by RESEARCH mode itself
