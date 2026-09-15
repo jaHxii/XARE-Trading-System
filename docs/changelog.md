@@ -4,6 +4,30 @@ All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).
 
+## [v0.2.0] — 2026-09-15 (M2)
+
+### Added
+- `MarketData.mqh`: symbol property capture (all §6 fields, `valid` verdict),
+  new-bar detection with duplicate-processing guard, closed-bar copy with
+  hard `shift<1` refusal, staleness calc, live spread/quotes, tick-grid price
+  normalization.
+- `Indicators.mqh`: EMA 20/50/200 + RSI + ADX(+DI/−DI) + ATR via handles
+  created once and released on deinit; manual ROC; `EMPTY_VALUE`/warm-up
+  guards; copy-out APIs (MQL5 cannot return references).
+- `Types.mqh`: `SXareBar`, `SXareSymbolProps`, `SXareFeatures`.
+- `Config.mqh` + EA inputs: indicator periods, `history_bars_min`.
+- EA: new-bar → closed-bar → features pipeline with DEBUG feature log;
+  SELF_TEST extended (ROC math, tick-grid normalization).
+
+### Fixed
+- error 229 (`reference cannot be used`): replaced reference-returning getters
+  with copy-out methods — an MQL5 semantic discovered by the real compiler.
+- long→datetime conversion warning in `IsNewBar`.
+
+### Verified
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_m2.log`).
+- Python suite: 12 passed (incl. new closed-bar/new-bar guards).
+
 ## [v0.1.0] — 2026-09-15
 
 ### Added

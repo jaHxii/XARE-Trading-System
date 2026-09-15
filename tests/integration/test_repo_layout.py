@@ -24,6 +24,8 @@ REQUIRED_FILES = [
     "mql5/Include/XARE/Config.mqh",
     "mql5/Include/XARE/Logger.mqh",
     "mql5/Include/XARE/Diagnostics.mqh",
+    "mql5/Include/XARE/MarketData.mqh",
+    "mql5/Include/XARE/Indicators.mqh",
 ]
 
 
@@ -57,3 +59,18 @@ def test_config_defaults_are_safe():
 def test_no_mql4_strict_property():
     src = (REPO / "mql5/XARE.mq5").read_text(encoding="utf-8")
     assert "#property strict" not in src, "MQL4-only directive present"
+
+
+def test_closed_bar_guard_in_data_layer():
+    """M2: data layer must hard-refuse shift<1 reads (look-ahead protection)."""
+    md = (REPO / "mql5/Include/XARE/MarketData.mqh").read_text(encoding="utf-8")
+    assert "if(shift < 1)" in md
+    ind = (REPO / "mql5/Include/XARE/Indicators.mqh").read_text(encoding="utf-8")
+    assert "shift < 1" in ind
+
+
+def test_new_bar_detection_exists():
+    """M2: new-bar gate must exist with a duplicate guard anchor."""
+    md = (REPO / "mql5/Include/XARE/MarketData.mqh").read_text(encoding="utf-8")
+    assert "IsNewBar" in md
+    assert "m_last_bar_time" in md

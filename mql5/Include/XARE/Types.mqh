@@ -1,9 +1,55 @@
 //+------------------------------------------------------------------+
 //| Types.mqh — shared vocabulary for XARE (MQL5)                    |
-//| v0.1.0 — M1: types needed by skeleton; extended in later builds  |
+//| v0.2.0 — M2 adds: SXareBar, SXareSymbolProps, SXareFeatures      |
 //+------------------------------------------------------------------+
 #ifndef __XARE_TYPES_MQH__
 #define __XARE_TYPES_MQH__
+
+//--- one CLOSED bar of market data (spec §5). Never contains forming-bar data.
+struct SXareBar
+  {
+   datetime         time;
+   double           open;
+   double           high;
+   double           low;
+   double           close;
+   long             tick_volume;
+   long             spread;         // bar spread in points (broker-reported)
+  };
+
+//--- broker symbol properties captured ONCE at init (spec §6). No assumptions.
+struct SXareSymbolProps
+  {
+   string           symbol;
+   int              digits;
+   double           point;
+   double           tick_size;
+   double           tick_value;
+   double           contract_size;
+   double           volume_min;
+   double           volume_max;
+   double           volume_step;
+   long             stops_level;
+   long             freeze_level;
+   long             trade_mode;
+   bool             valid;          // false ⇒ sizing must refuse to trade
+  };
+
+//--- feature snapshot for one closed bar (spec §7). Indicators are FEATURES.
+struct SXareFeatures
+  {
+   bool             valid;          // all required features readable
+   datetime         bar_time;       // closed bar these features describe
+   double           ema_fast;       // EMA 20
+   double           ema_mid;        // EMA 50
+   double           ema_slow;       // EMA 200
+   double           rsi;            // RSI 14
+   double           roc;            // Rate of Change 10 (computed, no builtin)
+   double           adx;            // ADX 14 main line
+   double           di_plus;        // ADX +DI
+   double           di_minus;       // ADX -DI
+   double           atr;            // ATR 14
+  };
 
 //--- operating modes (spec §1). SELF_TEST added for MQL5 self-tests.
 enum ENUM_XARE_MODE

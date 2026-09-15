@@ -1,17 +1,16 @@
 //+------------------------------------------------------------------+
 //|                                                     XARE.mq5     |
-//|        XARE — XAUUSD Adaptive Risk Engine  (v0.1.0, M1)          |
+//|        XARE — XAUUSD Adaptive Risk Engine  (v0.2.0, M2)          |
 //|                                                                  |
-//| M1 skeleton: lifecycle, mode gating, symbol capability probe,    |
-//| heartbeat logging, dashboard. Engines join in later milestones.  |
-//|                                                                  |
+//| M2: market data + indicator feature layer on closed bars.        |
+//| Still NO trading paths — engines evaluate and log only.          |
 //| Modes (default SIGNAL_ONLY — never default to trading):          |
 //|   RESEARCH  : future home of feature CSV export                  |
 //|   SIGNAL_ONLY: evaluate + report, never place orders             |
 //|   BACKTEST  : full pipeline in Strategy Tester                   |
 //|   DEMO      : full pipeline, demo account only                   |
 //|   PRODUCTION: full pipeline, live account (explicit enable)      |
-//|   SELF_TEST : run arithmetic self-tests, print PASS/FAIL, stop   |
+//|   SELF_TEST : run self-tests, print PASS/FAIL, stop              |
 //+------------------------------------------------------------------+
 #property copyright "XARE contributors"
 #property link        "https://github.com/jaHxii/XARE-Trading-System"
@@ -23,6 +22,8 @@
 #include <XARE\Config.mqh>
 #include <XARE\Logger.mqh>
 #include <XARE\Diagnostics.mqh>
+#include <XARE\MarketData.mqh>
+#include <XARE\Indicators.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -36,6 +37,16 @@ input group  "Market Data"
 input int            InpMaxSpreadPts    = 350;                   // Max spread (points) for entries
 input int            InpAbnSpreadPts    = 600;                   // Abnormal spread (points)
 
+input group  "Indicators"
+input int            InpEmaFast         = 20;                    // EMA fast period
+input int            InpEmaMid          = 50;                    // EMA mid period
+input int            InpEmaSlow         = 200;                   // EMA slow period
+input int            InpRsiPeriod       = 14;                    // RSI period
+input int            InpRocPeriod       = 10;                    // ROC period (bars)
+input int            InpAdxPeriod       = 14;                    // ADX period
+input int            InpAtrPeriod       = 14;                    // ATR period
+input int            InpHistoryBarsMin  = 260;                   // Min closed bars required
+
 input group  "Logging"
 input int            InpLogLevel        = 1;                     // 0=DEBUG 1=INFO 2=WARN 3=ERROR
 input bool           InpJournalCSV      = true;                  // Enable trade journal CSV
@@ -44,12 +55,16 @@ input bool           InpJournalCSV      = true;                  // Enable trade
 SXareConfig       g_cfg;
 CXareLogger       g_log;
 CXareDiagnostics  g_ui;
+CXareMarketData   g_md;
+CXareIndicators   g_ind;
 
 //--- runtime state
 string            g_symbol;
 string            g_tf_label;
 datetime          g_last_heartbeat = 0;
 bool              g_init_ok = false;
+datetime          g_last_processed_bar = 0;   // duplicate-processing guard
+bool              g_features_warned = false;  // log feature-missing once per episode
 
 //+------------------------------------------------------------------+
 //| Capability probe: log every symbol property the EA will rely on. |
@@ -163,6 +178,16 @@ int OnInit()
    g_cfg.log_level          = InpLogLevel;
    g_cfg.journal_csv_enabled= InpJournalCSV;
 
+   // M2: indicator periods
+   g_cfg.ema_fast_period    = InpEmaFast;
+   g_cfg.ema_mid_period     = InpEmaMid;
+   g_cfg.ema_slow_period    = InpEmaSlow;
+   g_cfg.rsi_period         = InpRsiPeriod;
+   g_cfg.roc_period         = InpRocPeriod;
+   g_cfg.adx_period         = InpAdxPeriod;
+   g_cfg.atr_period         = InpAtrPeriod;
+   g_cfg.history_bars_min   = InpHistoryBarsMin;
+
    // 2) logger
    if(!g_log.Init(g_symbol, g_cfg.magic, g_cfg.log_level,
                   g_cfg.journal_csv_enabled, g_cfg.journal_dir))
@@ -188,11 +213,27 @@ int OnInit()
 
    LogSymbolCapabilities();
 
-   // 5) dashboard
-   g_ui.Init(g_cfg.dashboard_enabled, "v0.1.0");
+   // 5) engines: market data + indicators (M2)
+   if(!g_md.Init(g_symbol, _Period, g_cfg.history_bars_min))
+     {
+      g_log.Error("INIT", "market data engine failed to initialize");
+      return INIT_FAILED;
+     }
+   if(!g_ind.Init(g_symbol, _Period, g_cfg))
+     {
+      g_log.Error("INIT", "indicator engine failed to initialize");
+      return INIT_FAILED;
+     }
+   SXareSymbolProps props;
+   g_md.GetProps(props);
+   g_log.Info("INIT", StringFormat("engines ready | props.valid=%s min_history=%d",
+              props.valid ? "true" : "false", g_cfg.history_bars_min));
+
+   // 6) dashboard
+   g_ui.Init(g_cfg.dashboard_enabled, "v0.2.0");
 
    g_init_ok = true;
-   g_log.Info("INIT", "initialization complete (M1 skeleton: no engines attached yet)");
+   g_log.Info("INIT", "initialization complete (M2: data+features live, no trading)");
    return INIT_SUCCEEDED;
   }
 
@@ -200,13 +241,14 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    g_log.Info("INIT", StringFormat("deinit reason=%d", reason));
+   g_ind.Release();          // indicator handles (§64)
    g_ui.Deinit();
    g_log.Deinit();
   }
 
 //+------------------------------------------------------------------+
 //| Self-test: arithmetic sanity used in Strategy Tester (§53).      |
-//| v0.1.0: config/enum sanity only; math tests arrive with engines. |
+//| v0.2.0: M2 adds ROC/price-normalization math on synthetic values.|
 //+------------------------------------------------------------------+
 void RunSelfTest()
   {
@@ -224,12 +266,22 @@ void RunSelfTest()
    if(XareRiskStateToString(XARE_RISK_HALTED)  != "HALTED")        { failed++; }
    if(XareExitToString(XARE_EXIT_TRAILING)     != "TRAILING_STOP") { failed++; }
 
-   if(failed==0) Print("XARE SELF-TEST: PASS (2 groups)");
+   // T3 (M2): ROC math
+   if(MathAbs(XareRateOfChange(110.0, 100.0) - 10.0) > 1e-9)  { failed++; Print("SELFTEST FAIL T3 roc up"); }
+   if(MathAbs(XareRateOfChange(90.0, 100.0) - (-10.0)) > 1e-9){ failed++; Print("SELFTEST FAIL T3 roc down"); }
+   if(XareRateOfChange(100.0, 0.0) != 0.0)                    { failed++; Print("SELFTEST FAIL T3 roc zero-div"); }
+
+   // T4 (M2): price normalization math vs tick-size grid (same formula as
+   // CXareMarketData::NormalizePrice, on synthetic values)
+   double n1 = NormalizeDouble(MathRound(123.478/0.05)*0.05, 2);  // expect 123.50
+   if(MathAbs(n1 - 123.50) > 1e-9)                            { failed++; Print("SELFTEST FAIL T4 tick-grid"); }
+
+   if(failed==0) Print("XARE SELF-TEST: PASS (4 groups)");
    else          Print("XARE SELF-TEST: FAIL (", failed, " checks)");
   }
 
 //+------------------------------------------------------------------+
-//| Heartbeat: proves tick flow + dashboard liveness in M1.          |
+//| Heartbeat: proves tick flow + dashboard liveness.                |
 //+------------------------------------------------------------------+
 void Heartbeat()
   {
@@ -239,6 +291,50 @@ void Heartbeat()
    g_last_heartbeat = now;
    g_log.Debug("TICK", StringFormat("alive | mode=%s | %s %s",
                XareModeToString(g_cfg.mode), g_symbol, g_tf_label));
+  }
+
+//+------------------------------------------------------------------+
+//| M2 per-bar pipeline: new bar -> closed-bar features -> log.      |
+//| No trading, no orders — evaluation only.                         |
+//+------------------------------------------------------------------+
+void ProcessBar()
+  {
+   SXareBar  bar;
+   SXareFeatures f;
+   if(!g_md.GetClosedBar(1, bar))
+     {
+      if(!g_features_warned)
+        {
+         g_log.Warn("FEAT", "closed bar unavailable — idle");
+         g_features_warned = true;
+        }
+      return;
+     }
+   if(!g_ind.Update(1, f) || !f.valid)
+     {
+      if(!g_features_warned)
+        {
+         g_log.Warn("FEAT", "features unavailable (warming up or history gap) — idle");
+         g_features_warned = true;
+        }
+      return;
+     }
+   g_features_warned = false;
+   g_last_processed_bar = f.bar_time;
+
+   int spread = g_md.CurrentSpreadPoints();
+   SXareSymbolProps props;
+   g_md.GetProps(props);
+   int dg = props.digits;
+   g_log.Debug("FEAT", StringFormat(
+      "bar=%s O=%s H=%s L=%s C=%s | ema20=%s ema50=%s ema200=%s rsi=%.1f roc=%.2f adx=%.1f (+DI %.1f / -DI %.1f) atr=%s spread=%dpt",
+      TimeToString(f.bar_time, TIME_DATE|TIME_MINUTES),
+      DoubleToString(bar.open,  dg), DoubleToString(bar.high, dg),
+      DoubleToString(bar.low,   dg), DoubleToString(bar.close, dg),
+      DoubleToString(f.ema_fast, dg), DoubleToString(f.ema_mid, dg),
+      DoubleToString(f.ema_slow, dg),
+      f.rsi, f.roc, f.adx, f.di_plus, f.di_minus,
+      DoubleToString(f.atr, dg), spread));
   }
 
 //+------------------------------------------------------------------+
@@ -256,15 +352,23 @@ void OnTick()
 
    Heartbeat();
 
-   // --- M1 dashboard snapshot with placeholder analytics ---------------
+   // --- M2: new-bar gate + duplicate processing guard -----------------
+   if(g_md.IsNewBar())
+     {
+      ProcessBar();
+     }
+
+   // --- dashboard snapshot (live values; analytics still placeholders) -
    double price       = SymbolInfoDouble(g_symbol, SYMBOL_BID);
-   int    spread_pts  = (int)SymbolInfoInteger(g_symbol, SYMBOL_SPREAD);
+   int    spread_pts  = g_md.CurrentSpreadPoints();
+   SXareFeatures feat;
+   bool have_feat = g_ind.Last(feat);
    int    open_xare   = 0;   // PositionManager counts by magic from M11
    double daily_pl    = 0.0;   // RiskEngine from M9
    double dd_pct      = 0.0;   // RiskEngine from M9
 
    g_ui.Update(g_symbol, g_tf_label, g_cfg.mode, price, spread_pts,
-               "UNKNOWN", 0, "NO_TRADE", 0.0,
+               have_feat ? "FEATURES_OK" : "UNKNOWN", 0, "NO_TRADE", 0.0,
                XareRiskStateToString(XARE_RISK_NORMAL),
                daily_pl, dd_pct, open_xare, "N/A",
                /*trading_allowed=*/false);
