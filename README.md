@@ -63,10 +63,11 @@ pip install -r requirements.txt
 python -m pytest ../tests --rootdir=.. -q   # run the test suite
 ```
 
-### MQL5 compilation (manual — MetaEditor required)
+### MQL5 compilation
 
-MetaEditor cannot be invoked from this environment, so compilation is a manual
-step (verified limitation, see `docs/testing.md`):
+Automated via the MetaEditor CLI where available (verified: 0 errors, 0
+warnings for v0.1.0); manual steps below otherwise. Details in
+`docs/testing.md`:
 
 1. Open MetaTrader 5 → `File → Open Data Folder`
 2. Copy `mql5/Include/XARE` into `MQL5/Include/`

@@ -34,7 +34,19 @@ requires the full acceptance battery in `docs/testing.md`).
   heuristics, research report generator
 - Python test suite (unit / integration / regression)
 
+### Fixed (M1 review pass)
+- Compilation achieved for real: **0 errors, 0 warnings** via MetaEditor64 CLI
+  (`/compile` + `/inc`), `.ex5` produced; compile log kept in `reports/output/`.
+- `#property version` set to `1.00` (display-only): this compiler build rejects
+  `0.x` majors with warning 68 regardless of format; authoritative version
+  remains **v0.1.0** (changelog + git tag).
+- Separated AutoTrading permission from demo-account checks in init validation.
+- Removed MQL4-only `#property strict` (was present at creation, fixed in review).
+- Logger `Init` no longer branches on an undefined error constant after
+  `FolderCreate`; failure handling is delegated to the `FileOpen` verdict.
+- Diagnostics bool conversions made explicit (no implicit long→bool ternaries).
+
 ### Notes
-- MQL5 compilation is a manual gate (no MetaEditor in the build environment);
-  see `docs/testing.md`.
 - No performance claims; nothing is validated until it passes the acceptance battery.
+- M1 audit: no trade APIs present (`OrderSend`/`CTrade`/position-modify), symbol
+  never hard-coded (`_Symbol` only) — both locked by regression tests.

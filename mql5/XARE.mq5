@@ -15,7 +15,8 @@
 //+------------------------------------------------------------------+
 #property copyright "XARE contributors"
 #property link        "https://github.com/jaHxii/XARE-Trading-System"
-#property version     "0.1.0"
+#property version     "1.00"  // display-only: this compiler rejects 0.x majors (warning 68).
+                                     // Authoritative version: v0.1.0 — see docs/changelog.md + git tag.  // x.yy format required by MetaEditor; semver v0.1.0 in changelog/tag
 #property description "XARE — XAUUSD Adaptive Risk Engine (research build, M1)"
 
 #include <XARE\Types.mqh>
