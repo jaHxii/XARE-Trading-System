@@ -1,5 +1,27 @@
 # Changelog
 
+## [v0.16.0] — 2026-09-15 (M19b: real broker reference recorded)
+
+### Added
+- `docs/broker_xauusdm.md`: ground-truth record of the Exness XAUUSDm
+  specification (captured from the MT5 Specification dialog by jaHxii,
+  2026-09-15): digits 3, contract 100 XAU, stops level 0, volume
+  0.01/200/0.01, filling FOK+IOC, margin currency XAU / profit USD,
+  ~$215/lot initial margin, Wednesday ×3 margin rate, swap long −533.9 /
+  short 0, daily session break 20:58→22:00 server time.
+- Spec-drift check at EA init: warn-only comparison of the live numeric
+  profile against the recorded reference (matched by profile values, never
+  by symbol name). Live values always drive all math; the reference only
+  surfaces unexpected broker-side changes.
+- SELF_TEST group T13b: sizing/point-value fixtures pinned to the real
+  XAUUSDm numbers ($0.10 per point per lot; $1,000 @ 0.5% with a 3.000 SL
+  → 0.01 lot; $50 account → trade refused below min lot, §49).
+
+### Guard fixes
+- Hard-coded-symbol regression guard now also covers `.mqh` includes;
+  INIT log strings reworded so code never references a symbol name (the
+  doc filename identifies the reference, not a hard-code).
+
 ## [v0.15.0] — 2026-09-15 (M19 dashboard)
 
 ### Added

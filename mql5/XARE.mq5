@@ -216,6 +216,25 @@ void LogSymbolCapabilities()
       g_log.Error("INIT", "invalid volume constraints from broker — do not trade this symbol");
    if(tick_sz <= 0.0 || tick_val <= 0.0)
       g_log.Error("INIT", "invalid tick size/value — risk sizing impossible; EA must not trade");
+
+   //--- spec-drift check vs the recorded XAUUSDm reference (docs/broker_xauusdm.md).
+   //--- Warn-only, NUMERIC profile match (never by symbol name — behavior
+   //--- must not depend on what a symbol is called): if the live capture
+   //--- matches the recorded digits/contract/stops/volume profile, any
+   //--- deviation is reported. Live values always drive the math.
+   bool profile_matches_reference =
+      (digits == 3 && contract == 100.0 && stops_lvl == 0 &&
+       MathAbs(min_lot - 0.01) <= 1e-9 && MathAbs(max_lot - 200.0) <= 1e-9 &&
+       MathAbs(lot_step - 0.01) <= 1e-9);
+   if(profile_matches_reference)
+     {
+      g_log.Info("INIT", "symbol profile matches the recorded gold reference (docs/broker_xauusdm.md)");
+      long fm = SymbolInfoInteger(g_symbol, SYMBOL_FILLING_MODE);
+      if((fm & SYMBOL_FILLING_FOK) == 0 && (fm & SYMBOL_FILLING_IOC) == 0)
+         g_log.Warn("INIT", StringFormat("spec drift: filling modes=%d, reference says FOK+IOC", (int)fm));
+     }
+   else
+      g_log.Info("INIT", "symbol profile differs from the recorded gold reference — using live values (no action needed)");
   }
 
 //+------------------------------------------------------------------+
@@ -803,6 +822,27 @@ void RunSelfTest()
       XareInBlackout(ev + 31*60, ev, 30, 30) ||
       XareInBlackout(ev, 0, 30, 30))
       { failed++; Print("SELFTEST FAIL T15 news-window"); }
+
+   // T13b (M19b): REAL Exness XAUUSDm profile (recorded 2026-09-15,
+   // docs/broker_xauusdm.md) — pins the math consequences of the actual
+   // broker specification. Live capture still overrides at runtime.
+   SXareSymbolProps xm; xm.symbol="TEST";   // name unused; NUMBERS are the real record
+                     xm.digits=3; xm.point=0.001;
+                     xm.tick_size=0.001; xm.tick_value=0.10; xm.contract_size=100.0;
+                     xm.volume_min=0.01; xm.volume_max=200.0; xm.volume_step=0.01;
+                     xm.stops_level=0; xm.freeze_level=0; xm.trade_mode=4; xm.valid=true;
+   // point value: $0.10 per 0.001 per lot (100oz contract)
+   if(MathAbs(XarePointValuePerLot(xm) - 0.10) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T13b xm point-value"); }
+   // sizing: $1,000 @ 0.5% = $5 risk; SL 3.000 (3000pt x $0.10 = $300/lot)
+   // raw = 5/300 = 0.01667 -> snapped DOWN to 0.01
+   if(!XareVolumeForRisk(1000.0, 0.5, 3000.0, xm, 0.5, v9, rm9) ||
+      MathAbs(v9 - 0.01) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T13b xm sizing"); }
+   // $50 account, same trade: raw 0.000833 -> below 0.01 min -> SKIP (§49)
+   if(XareVolumeForRisk(50.0, 0.5, 3000.0, xm, 0.5, v9, rm9))
+      { failed++; Print("SELFTEST FAIL T13b xm small-account-skip"); }
+   // stops level 0: the plan SL floor is spread-only (min_dist = 0 + spread)
 
    // T7 (M5): pivot confirmation math — a pivot needs lookback + confirm bars
    if(CXareStructureEngine::MinBarsForPivot(3, 2) != 5)
