@@ -62,6 +62,17 @@ struct SXareConfig
    int              sweep_reclaim_bars;  // close back within N bars ⇒ confirmed
    int              swing_liquidity_lookback; // bars scanned for swing extremes
 
+   // Signals (§15). All thresholds are hypotheses (docs/parameters.md).
+   bool             setup_trend_continuation;   // enable flags (§15)
+   bool             setup_trend_pullback;
+   bool             setup_breakout;
+   bool             setup_breakout_retest;
+   bool             setup_range_reversal;
+   bool             setup_liquidity_sweep_reversal;
+   double           pullback_ema_zone_atr; // pullback zone half-width in ATR
+   double           min_setup_confidence;  // setup-level floor (0..100)
+   int              retest_valid_bars;     // break must be recent to retest
+
    // Logging / Research (§34, §37)
    int              log_level;            // 0=DEBUG 1=INFO 2=WARN 3=ERROR
    bool             research_csv_enabled; // RESEARCH mode feature rows
@@ -117,6 +128,17 @@ void XareConfigDefaults(SXareConfig &c)
    c.sweep_atr_multiple     = 0.25;
    c.sweep_reclaim_bars     = 3;
    c.swing_liquidity_lookback = 40;
+
+   // Signals: all six enabled; thresholds are hypotheses
+   c.setup_trend_continuation = true;
+   c.setup_trend_pullback     = true;
+   c.setup_breakout           = true;
+   c.setup_breakout_retest    = true;
+   c.setup_range_reversal     = true;
+   c.setup_liquidity_sweep_reversal = true;
+   c.pullback_ema_zone_atr    = 1.2;
+   c.min_setup_confidence     = 55.0;
+   c.retest_valid_bars        = 8;
 
    c.log_level              = 1;      // INFO
    c.research_csv_enabled   = false;  // enabled by RESEARCH mode itself

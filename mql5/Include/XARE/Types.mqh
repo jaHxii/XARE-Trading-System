@@ -171,6 +171,19 @@ struct SXareLiquidity
    datetime         evaluated_at;
   };
 
+//--- NO_TRADE reason codes (spec §15: engine must be capable of returning
+//--- NO_TRADE; every no-trade must say why)
+enum ENUM_XARE_NOTRADE_REASON
+  {
+   XARE_NT_NONE = 0,
+   XARE_NT_INSUFFICIENT_DATA,   // features/verdicts missing or not valid
+   XARE_NT_REGIME_INCOMPATIBLE, // regime offers no setup precondition
+   XARE_NT_ALIGNMENT_CONFLICT,  // MTF mixed/neutral blocks directional setups
+   XARE_NT_REGIME_CONFIDENCE,   // regime confidence below floor
+   XARE_NT_NO_SETUP_TRIGGER,    // context valid but no setup fired this bar
+   XARE_NT_SETUP_DISABLED       // setup matched but disabled in config
+  };
+
 //--- setup types (spec §15)
 enum ENUM_XARE_SETUP
   {
@@ -257,6 +270,22 @@ struct SXareRegime
    int              confidence;     // 0..100 score, not probability
    string           evidence;
    datetime         evaluated_at;
+  };
+
+//--- final decision object (spec §15/§16): everything needed to explain
+//--- a bar's verdict — trade candidate or NO_TRADE with reason + breakdown
+struct SXareDecision
+  {
+   bool             has_signal;         // false = NO_TRADE
+   ENUM_XARE_NOTRADE_REASON nt_reason;  // why not (when has_signal=false)
+   int              direction;          // +1 buy, -1 sell, 0 flat
+   ENUM_XARE_SETUP  setup;
+   double           setup_confidence;
+   double           entry_lo;           // entry zone (price)
+   double           entry_hi;
+   string           invalidation;       // what cancels the idea
+   string           evidence;           // combined supporting evidence
+   datetime         bar_time;
   };
 
 //--- a candidate setup produced by the SignalEngine (spec §15)
@@ -394,6 +423,54 @@ string XareExitToString(const ENUM_XARE_EXIT_REASON r)
       case XARE_EXIT_SIGNAL_REVERSAL: return "SIGNAL_REVERSAL";
       case XARE_EXIT_EMERGENCY:       return "EMERGENCY";
       default:                        return "NONE";
+     }
+  }
+
+string XareNoTradeToString(const ENUM_XARE_NOTRADE_REASON r)
+  {
+   switch(r)
+     {
+      case XARE_NT_INSUFFICIENT_DATA:   return "INSUFFICIENT_DATA";
+      case XARE_NT_REGIME_INCOMPATIBLE: return "REGIME_INCOMPATIBLE";
+      case XARE_NT_ALIGNMENT_CONFLICT:  return "ALIGNMENT_CONFLICT";
+      case XARE_NT_REGIME_CONFIDENCE:   return "REGIME_CONFIDENCE";
+      case XARE_NT_NO_SETUP_TRIGGER:    return "NO_SETUP_TRIGGER";
+      case XARE_NT_SETUP_DISABLED:      return "SETUP_DISABLED";
+      default:                          return "NONE";
+     }
+  }
+
+string XareAlignmentToString(const ENUM_XARE_ALIGNMENT a)
+  {
+   switch(a)
+     {
+      case XARE_ALIGN_BULLISH: return "BULLISH";
+      case XARE_ALIGN_BEARISH: return "BEARISH";
+      case XARE_ALIGN_MIXED:   return "MIXED";
+      default:                 return "NEUTRAL";
+     }
+  }
+
+string XareStructTrendToString(const ENUM_XARE_STRUCT_TREND t)
+  {
+   switch(t)
+     {
+      case XARE_STRUCT_BULLISH: return "BULLISH";
+      case XARE_STRUCT_BEARISH: return "BEARISH";
+      case XARE_STRUCT_MIXED:   return "MIXED";
+      default:                  return "NEUTRAL";
+     }
+  }
+
+string XareSessionToString(const ENUM_XARE_SESSION s)
+  {
+   switch(s)
+     {
+      case XARE_SESS_ASIAN:   return "ASIAN";
+      case XARE_SESS_LONDON:  return "LONDON";
+      case XARE_SESS_NEWYORK: return "NEWYORK";
+      case XARE_SESS_OVERLAP: return "OVERLAP";
+      default:                return "OFF";
      }
   }
 

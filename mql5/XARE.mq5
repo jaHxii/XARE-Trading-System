@@ -30,6 +30,7 @@
 #include <XARE\StructureEngine.mqh>
 #include <XARE\SessionEngine.mqh>
 #include <XARE\LiquidityEngine.mqh>
+#include <XARE\SignalEngine.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -53,6 +54,17 @@ input int            InpAdxPeriod       = 14;                    // ADX period
 input int            InpAtrPeriod       = 14;                    // ATR period
 input int            InpHistoryBarsMin  = 260;                   // Min closed bars required
 
+input group  "Signals"
+input bool           InpSetupTrendCont  = true;                  // Setup: TREND_CONTINUATION
+input bool           InpSetupPullback   = true;                  // Setup: TREND_PULLBACK
+input bool           InpSetupBreakout   = true;                  // Setup: BREAKOUT
+input bool           InpSetupRetest     = true;                  // Setup: BREAKOUT_RETEST
+input bool           InpSetupRangeRev   = true;                  // Setup: RANGE_REVERSAL
+input bool           InpSetupSweepRev   = true;                  // Setup: LIQ_SWEEP_REVERSAL
+input double         InpPullbackZoneATR = 1.2;                   // Pullback zone half-width (ATR)
+input double         InpMinSetupConf    = 55.0;                  // Min setup confidence
+input int            InpRetestValidBars = 8;                     // Retest window (bars)
+
 input group  "Logging"
 input int            InpLogLevel        = 1;                     // 0=DEBUG 1=INFO 2=WARN 3=ERROR
 input bool           InpJournalCSV      = true;                  // Enable trade journal CSV
@@ -68,6 +80,11 @@ CXareRegimeEngine  g_regime;
 CXareStructureEngine g_struct;
 CXareSessionEngine  g_sess;
 CXareLiquidityEngine g_liq;
+CXareSignalEngine   g_sig;
+
+//--- last bar decision (for dashboard; signal-only — nothing is executed)
+SXareDecision     g_last_decision;
+bool              g_have_decision = false;
 
 //--- runtime state
 string            g_symbol;
@@ -199,6 +216,17 @@ int OnInit()
    g_cfg.atr_period         = InpAtrPeriod;
    g_cfg.history_bars_min   = InpHistoryBarsMin;
 
+   // M7: signal setup flags and thresholds
+   g_cfg.setup_trend_continuation       = InpSetupTrendCont;
+   g_cfg.setup_trend_pullback           = InpSetupPullback;
+   g_cfg.setup_breakout                 = InpSetupBreakout;
+   g_cfg.setup_breakout_retest          = InpSetupRetest;
+   g_cfg.setup_range_reversal           = InpSetupRangeRev;
+   g_cfg.setup_liquidity_sweep_reversal = InpSetupSweepRev;
+   g_cfg.pullback_ema_zone_atr          = InpPullbackZoneATR;
+   g_cfg.min_setup_confidence           = InpMinSetupConf;
+   g_cfg.retest_valid_bars              = InpRetestValidBars;
+
    // 2) logger
    if(!g_log.Init(g_symbol, g_cfg.magic, g_cfg.log_level,
                   g_cfg.journal_csv_enabled, g_cfg.journal_dir))
@@ -214,7 +242,7 @@ int OnInit()
       default:         g_tf_label=EnumToString(_Period);
      }
 
-   g_log.Info("INIT", StringFormat("XARE v0.1.0 starting | mode=%s trading=%s symbol=%s tf=%s",
+   g_log.Info("INIT", StringFormat("XARE v0.7.0 starting | mode=%s trading=%s symbol=%s tf=%s",
               XareModeToString(g_cfg.mode),
               g_cfg.trading_enabled?"ON":"OFF", g_symbol, g_tf_label));
 
@@ -264,6 +292,7 @@ int OnInit()
       g_ind.Release();
       return INIT_FAILED;
      }
+   g_sig.Init(g_cfg);   // pure engine; cannot fail
    SXareSymbolProps props;
    g_md.GetProps(props);
    g_log.Info("INIT", StringFormat("engines ready | props.valid=%s min_history=%d mtf=H4+H1+%s",
@@ -337,6 +366,101 @@ void RunSelfTest()
                                         2.0, 0.25, up, down, pen))
       { failed++; Print("SELFTEST FAIL T8b shallow wick is not a sweep"); }
 
+   // T9 (M7): signal-engine gates on synthetic contexts ---------------
+   SXareConfig sc; XareConfigDefaults(sc);
+   SXareRegime   rg;  rg.valid=true; rg.regime=XARE_REGIME_TREND_UP; rg.confidence=80; rg.evidence="t"; rg.evaluated_at=0;
+   SXareMTF      mt;  mt.valid=true; mt.alignment=XARE_ALIGN_BULLISH; mt.h4=XARE_TF_BULL; mt.h1=XARE_TF_BULL; mt.exec=XARE_TF_BULL; mt.evidence="t"; mt.evaluated_at=0;
+   SXareStructure stp; stp.valid=true; stp.trend=XARE_STRUCT_BULLISH;
+                     stp.last_swing_high=2050.0; stp.prev_swing_high=2040.0;
+                     stp.last_swing_low=2000.0;  stp.prev_swing_low=1990.0;
+                     stp.bos_bull=false; stp.bos_bear=false; stp.choch=false;
+                     stp.zone_count_res=0; stp.zone_count_sup=0; stp.evidence=""; stp.evaluated_at=0;
+   for(int i=0;i<4;i++){ stp.resistance[i]=0; stp.support[i]=0; }
+   SXareSession  ss;  ss.valid=true; ss.session=XARE_SESS_LONDON; ss.minute_of_day=600; ss.high=2055; ss.low=2005; ss.range=50; ss.episode_bars=5; ss.evidence=""; ss.evaluated_at=0;
+   SXareLiquidity lq; lq.valid=true; lq.sweep_up=false; lq.sweep_down=false; lq.swept_level=0; lq.level_name=""; lq.penetration_atr=0; lq.evidence=""; lq.evaluated_at=0;
+   SXareFeatures ft;  ft.valid=true; ft.bar_time=D'2026.01.05 10:00';
+                     ft.ema_fast=2045; ft.ema_mid=2035; ft.ema_slow=2010;
+                     ft.rsi=55; ft.roc=0.5; ft.adx=30; ft.di_plus=25; ft.di_minus=15; ft.atr=4.0;
+   SXareBar      br;  br.time=D'2026.01.05 10:15'; br.open=2040; br.high=2052; br.low=2036; br.close=2048; br.tick_volume=1000; br.spread=150;
+
+   CXareSignalEngine sigT;
+   sigT.Init(sc);
+
+   // T9a: everything valid but no trigger ⇒ NO_TRADE with reason.
+   // Bearish close (no rejection candle) and no ROC re-acceleration ensure
+   // neither pullback nor continuation can fire on this bar.
+   SXareBar br_nt; br_nt.time=D'2026.01.05 10:15'; br_nt.open=2046; br_nt.high=2052;
+             br_nt.low=2042; br_nt.close=2044; br_nt.tick_volume=1000; br_nt.spread=150;
+   SXareDecision d9;
+   sigT.Evaluate(rg, mt, stp, ss, lq, br_nt, ft, 0.7, d9);
+   if(d9.has_signal || d9.nt_reason == XARE_NT_NONE)
+      { failed++; Print("SELFTEST FAIL T9a no-trade-reason"); }
+
+   // T9b: invalid features ⇒ INSUFFICIENT_DATA
+   SXareFeatures ft_bad = ft; ft_bad.valid = false;
+   SXareDecision d9b;
+   sigT.Evaluate(rg, mt, stp, ss, lq, br, ft_bad, 0.1, d9b);
+   if(d9b.has_signal || d9b.nt_reason != XARE_NT_INSUFFICIENT_DATA)
+      { failed++; Print("SELFTEST FAIL T9b insufficient-data"); }
+
+   // T9c: UNSAFE regime ⇒ REGIME_INCOMPATIBLE
+   SXareRegime rg_bad = rg; rg_bad.regime = XARE_REGIME_UNSAFE;
+   SXareDecision d9c;
+   sigT.Evaluate(rg_bad, mt, stp, ss, lq, br, ft, 0.1, d9c);
+   if(d9c.has_signal || d9c.nt_reason != XARE_NT_REGIME_INCOMPATIBLE)
+      { failed++; Print("SELFTEST FAIL T9c regime-incompatible"); }
+
+   // T9d: low regime confidence ⇒ REGIME_CONFIDENCE
+   SXareRegime rg_low = rg; rg_low.confidence = 30;
+   SXareDecision d9d;
+   sigT.Evaluate(rg_low, mt, stp, ss, lq, br, ft, 0.1, d9d);
+   if(d9d.has_signal || d9d.nt_reason != XARE_NT_REGIME_CONFIDENCE)
+      { failed++; Print("SELFTEST FAIL T9d regime-confidence"); }
+
+   // T10a: MIXED alignment ⇒ ALIGNMENT_CONFLICT (no forced side)
+   SXareMTF mt_mix = mt; mt_mix.alignment = XARE_ALIGN_MIXED;
+   SXareDecision d10;
+   sigT.Evaluate(rg, mt_mix, stp, ss, lq, br, ft, 0.1, d10);
+   if(d10.has_signal || d10.nt_reason != XARE_NT_ALIGNMENT_CONFLICT)
+      { failed++; Print("SELFTEST FAIL T10a alignment-conflict"); }
+
+   // T10b: pullback direction matches alignment (bull setup only on bullish)
+   SXareBar br_pb = br; br_pb.open=2044; br_pb.high=2050; br_pb.low=2038; br_pb.close=2049;
+   // ema zone: 2040.4..2046.6 (zone 1.2*4*0.5=2.4 around 2038..2044+... )
+   // touched zone (low 2038 <= zhi), bullish rejection close, rsi 55
+   SXareDecision d10b;
+   sigT.Evaluate(rg, mt, stp, ss, lq, br_pb, ft, 0.1, d10b);
+   if(!d10b.has_signal || d10b.direction <= 0 ||
+      d10b.setup != XARE_SETUP_TREND_PULLBACK)
+      { failed++; Print("SELFTEST FAIL T10b pullback-direction"); }
+
+   // T10c: disabled setup ⇒ SETUP_DISABLED
+   SXareConfig sc_off = sc; sc_off.setup_trend_pullback = false;
+   CXareSignalEngine sig_off; sig_off.Init(sc_off);
+   SXareDecision d10c;
+   sig_off.Evaluate(rg, mt, stp, ss, lq, br_pb, ft, 0.1, d10c);
+   if(d10c.has_signal || d10c.nt_reason != XARE_NT_SETUP_DISABLED)
+      { failed++; Print("SELFTEST FAIL T10c setup-disabled"); }
+
+   // T10d: sweep reversal fires on sellside sweep with reclaim (bull)
+   SXareLiquidity lq_sw = lq; lq_sw.sweep_down = true; lq_sw.swept_level = 2000.0;
+   lq_sw.level_name = "PDL"; lq_sw.penetration_atr = 0.6;
+   SXareBar br_sw = br; br_sw.low=1998.5; br_sw.close=2003.0;
+   // NOTE: alignment is bullish in this synthetic context, so the sweep-reversal
+   // long is permitted; regime TREND_UP with conf 80 passes gates.
+   CXareSignalEngine sig_sw; sig_sw.Init(sc);
+   SXareDecision d10d;
+   sig_sw.Evaluate(rg, mt, stp, ss, lq_sw, br_sw, ft, 0.1, d10d);
+   if(!d10d.has_signal || d10d.setup != XARE_SETUP_LIQUIDITY_SWEEP_REVERSAL ||
+      d10d.direction <= 0)
+      { failed++; Print("SELFTEST FAIL T10d sweep-reversal"); }
+
+   // T10e: conflicting signals — sweep long vs MIXED alignment ⇒ conflict wins
+   SXareDecision d10e;
+   sig_sw.Evaluate(rg, mt_mix, stp, ss, lq_sw, br_sw, ft, 0.1, d10e);
+   if(d10e.has_signal || d10e.nt_reason != XARE_NT_ALIGNMENT_CONFLICT)
+      { failed++; Print("SELFTEST FAIL T10e conflict-beats-sweep"); }
+
    // T7 (M5): pivot confirmation math — a pivot needs lookback + confirm bars
    if(CXareStructureEngine::MinBarsForPivot(3, 2) != 5)
       { failed++; Print("SELFTEST FAIL T7 pivot math"); }
@@ -373,7 +497,7 @@ void RunSelfTest()
    double n1 = NormalizeDouble(MathRound(123.478/0.05)*0.05, 2);  // expect 123.50
    if(MathAbs(n1 - 123.50) > 1e-9)                            { failed++; Print("SELFTEST FAIL T4 tick-grid"); }
 
-   if(failed==0) Print("XARE SELF-TEST: PASS (8 groups)");
+   if(failed==0) Print("XARE SELF-TEST: PASS (10 groups)");
    else          Print("XARE SELF-TEST: FAIL (", failed, " checks)");
   }
 
@@ -465,6 +589,32 @@ void ProcessBar()
    SXareLiquidity liq;
    if(g_liq.Evaluate(1, session, f.atr, liq) && liq.valid)
       g_log.Info("LIQ", liq.evidence);
+
+   // --- M7: signal evaluation on the same closed-bar context ----------
+   double prev_roc = 0.0;
+   double c_now  = iClose(g_symbol, _Period, 1);
+   double c_prev = iClose(g_symbol, _Period, 1 + g_cfg.roc_period);
+   if(c_prev > 0 && c_now > 0)
+      prev_roc = XareRateOfChange(c_now, c_prev);
+
+   SXareDecision decision;
+   g_sig.Evaluate(regime, mtf, structure, session, liq, bar, f, prev_roc, decision);
+   g_last_decision = decision;
+   g_have_decision = true;
+
+   // signal-only output: the DECISION line for every new M15 candle
+   if(decision.has_signal)
+      g_log.Info("DECISION", StringFormat(
+         "%s %s conf=%.0f entry[%s..%s] | %s | invalidation: %s",
+         decision.direction > 0 ? "BUY" : "SELL",
+         XareSetupToString(decision.setup), decision.setup_confidence,
+         DoubleToString(decision.entry_lo, props.digits),
+         DoubleToString(decision.entry_hi, props.digits),
+         decision.evidence, decision.invalidation));
+   else
+      g_log.Info("DECISION", StringFormat(
+         "NO_TRADE (%s) | %s",
+         XareNoTradeToString(decision.nt_reason), decision.evidence));
   }
 
 //+------------------------------------------------------------------+
@@ -493,12 +643,18 @@ void OnTick()
    int    spread_pts  = g_md.CurrentSpreadPoints();
    SXareFeatures feat;
    bool have_feat = g_ind.Last(feat);
+   string decision_txt = "NO_DECISION";
+   if(g_have_decision)
+      decision_txt = g_last_decision.has_signal
+         ? StringFormat("%s %s", g_last_decision.direction > 0 ? "BUY" : "SELL",
+                        XareSetupToString(g_last_decision.setup))
+         : StringFormat("NO_TRADE(%s)", XareNoTradeToString(g_last_decision.nt_reason));
    int    open_xare   = 0;   // PositionManager counts by magic from M11
    double daily_pl    = 0.0;   // RiskEngine from M9
    double dd_pct      = 0.0;   // RiskEngine from M9
 
    g_ui.Update(g_symbol, g_tf_label, g_cfg.mode, price, spread_pts,
-               have_feat ? "FEATURES_OK" : "UNKNOWN", 0, "NO_TRADE", 0.0,
+               have_feat ? "FEATURES_OK" : "UNKNOWN", 0, decision_txt, 0.0,
                XareRiskStateToString(XARE_RISK_NORMAL),
                daily_pl, dd_pct, open_xare, "N/A",
                /*trading_allowed=*/false);

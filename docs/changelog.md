@@ -4,6 +4,32 @@ All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).
 
+## [v0.7.0] — 2026-09-15 (M7)
+
+### Added
+- `SignalEngine.mqh`: pure decision module — six setup detectors
+  (TREND_CONTINUATION, TREND_PULLBACK, BREAKOUT, BREAKOUT_RETEST,
+  RANGE_REVERSAL, LIQUIDITY_SWEEP_REVERSAL), gated evaluation producing
+  either a candidate (direction, setup, confidence, entry zone,
+  invalidation, evidence) or NO_TRADE with a machine-readable reason
+  (INSUFFICIENT_DATA, REGIME_INCOMPATIBLE, REGIME_CONFIDENCE,
+  ALIGNMENT_CONFLICT, NO_SETUP_TRIGGER, SETUP_DISABLED).
+- Documented gate order + detector priority; NEUTRAL alignment permits
+  counter-move setups only; MIXED blocks everything.
+- EA: DECISION line printed for **every new M15 candle** (signal-only mode,
+  no orders); decision shown on dashboard.
+- SELF_TEST groups T9 (gates) and T10 (detection, direction policy,
+  disabled setups, conflicts) on synthetic contexts.
+- Python contract tests mirroring the MQL5 semantics (8 tests).
+
+### Fixed
+- SELF_TEST T9a fixture itself could trigger pullback/continuation (would
+  have failed in the tester); replaced with a genuinely non-triggering bar.
+
+### Verified
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_m7.log`).
+- Python suite: 26 passed.
+
 ## [v0.6.0] — 2026-09-15 (M6 + integration review)
 
 ### Added
