@@ -13,6 +13,14 @@
 //| management decisions (BE/trail/partial/time/regime/reversal).    |
 //| M12 safety gate: ONE GO/BLOCK choke point; emergency latch.      |
 //| Orders flow ONLY through: safety gate -> execution engine.       |
+//| v0.17.0 hardening (docs/hardening_review.md, items C1–C16):      |
+//|   state persistence + restart recovery (StateStore), startup     |
+//|   health check (HealthCheck), adaptive bounded risk factors,     |
+//|   DEFENSIVE survival state, profit-lock floor, capital stages,   |
+//|   Friday/weekend engine, cooldown suite (post-SL / slippage /    |
+//|   per-session), MT5 economic-calendar news engine (fail-safe),   |
+//|   breakout strength bands, micro-account MIN VOLUME TOO RISKY,   |
+//|   regime-strategy matrix, dashboard account/stage/health rows.   |
 //| Trading modes (DEMO/PRODUCTION/BACKTEST) require the explicit    |
 //| trading switch; default mode never sends.                        |
 //| Modes (default SIGNAL_ONLY — never default to trading):          |
@@ -50,6 +58,8 @@
 #include <XARE\NewsFilter.mqh>
 #include <XARE\ResearchLogger.mqh>
 #include <XARE\PerformanceTracker.mqh>
+#include <XARE\StateStore.mqh>
+#include <XARE\HealthCheck.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -124,6 +134,29 @@ input int            InpNewsAfterMin    = 30;                    // News blackou
 input int            InpExpectMinTrades = 30;                    // Expectancy gate: min closed trades
 input double         InpExpectBlockR    = 0.10;                  // Expectancy gate: block below -R
 
+input group  "Hardening v0.17: adaptive risk + survival"
+input double         InpFactorMin        = 0.5;                  // Adaptive factor hard floor (each)
+input int            InpMaxConsecLossDays= 2;                    // Losing days -> DEFENSIVE (0=off)
+input double         InpMinMarginLevel   = 200.0;                // Margin level floor % (0=off)
+input bool           InpProfitLock       = false;                // Profit-lock floor (UNVALIDATED)
+input double         InpLockMilestonePct = 10.0;                 // Lock: milestone gain %
+input double         InpLockFloorPct     = 50.0;                 // Lock: protected % of gain
+input bool           InpStagesEnabled    = true;                 // Capital stages (research labels)
+
+input group  "Hardening v0.17: weekend + cooldowns"
+input int            InpFridayCutoffMin  = 1200;                 // Friday final-entry cutoff (min-of-day)
+input bool           InpFridayCloseAll   = false;                // Close all at Friday cutoff
+input int            InpPostSLCooldown   = 4;                    // Post-SL cooldown (bars, 0=off)
+input double         InpSlipCooldownPts  = 150.0;                // Abnormal slippage trigger (points, 0=off)
+input int            InpSlipCooldownBars = 4;                    // Slippage cooldown (bars)
+input int            InpMaxTradesSession = 2;                    // Max trades per session (0=off)
+
+input group  "Hardening v0.17: news + breakout + health"
+input bool           InpNewsUseCalendar  = true;                 // MT5 economic calendar (CSV fallback)
+input double         InpBreakoutBodyPct  = 50.0;                 // Breakout: body >= % of range
+input double         InpBreakoutStrongATR= 0.5;                  // Breakout: strong band (ATR beyond)
+input bool           InpHealthCheck      = true;                 // Startup health gate (BLOCKED blocks sends)
+
 input group  "Logging"
 input int            InpLogLevel        = 1;                     // 0=DEBUG 1=INFO 2=WARN 3=ERROR
 input bool           InpJournalCSV      = true;                  // Enable trade journal CSV
@@ -149,6 +182,8 @@ CXareSafetyEngine   g_safety;
 CXareNewsFilter     g_news;
 CXareResearchLogger g_res;
 CXarePerformanceTracker g_perf;
+CXareStateStore     g_state;
+CXareHealthCheck    g_health;
 
 //--- last bar decision (for dashboard; signal-only — nothing is executed)
 SXareDecision     g_last_decision;
@@ -162,6 +197,12 @@ bool              g_have_plan     = false;
 bool              g_emergency_ref = false;   // mirror of the safety latch
 string            g_sess_cache    = "N/A";   // last evaluated session label
 string            g_news_ui_why   = "";      // news reason scratch (panel)
+ENUM_XARE_HEALTH  g_health_verdict = XARE_HEALTH_UNKNOWN;
+string            g_halted_reason = "";      // circuit-breaker log dedup
+bool              g_weekly_halt_logged = false;
+bool              g_daily_halt_logged  = false;
+ENUM_XARE_WEEKEND g_weekend_state  = XARE_WKEND_NONE;   // recomputed per bar
+string            g_stage_cache    = "-";   // last computed capital stage
 
 //--- runtime state
 string            g_symbol;
@@ -440,15 +481,89 @@ int OnInit()
    g_pos.Init(g_cfg.magic, &g_log);   // position state machine
    g_exit.Init(g_cfg);  // pure management decisions
    g_safety.Init();     // gatekeeper + emergency latch
-   g_news.Init(InpNewsBeforeMin, InpNewsAfterMin);  // §14 fail-safe filter
+   g_news.Init(g_cfg.news_source, InpNewsBeforeMin, InpNewsAfterMin);  // §14 fail-safe filter
    g_cfg.expectancy_min_trades = InpExpectMinTrades;
    g_cfg.expectancy_block_r    = InpExpectBlockR;
+
+   // v0.17.0 hardening inputs
+   g_cfg.factor_min             = InpFactorMin;
+   g_cfg.max_consec_losing_days = InpMaxConsecLossDays;
+   g_cfg.min_margin_level_pct   = InpMinMarginLevel;
+   g_cfg.profit_lock_enabled    = InpProfitLock;
+   g_cfg.lock_milestone_pct     = InpLockMilestonePct;
+   g_cfg.lock_floor_pct         = InpLockFloorPct;
+   g_cfg.stages_enabled         = InpStagesEnabled;
+   g_cfg.friday_cutoff_min      = InpFridayCutoffMin;
+   g_cfg.friday_close_all       = InpFridayCloseAll;
+   g_cfg.post_sl_cooldown_bars  = InpPostSLCooldown;
+   g_cfg.slip_cooldown_points   = InpSlipCooldownPts;
+   g_cfg.slip_cooldown_bars     = InpSlipCooldownBars;
+   g_cfg.max_trades_per_session = InpMaxTradesSession;
+   g_cfg.news_source            = InpNewsUseCalendar ? XARE_NEWS_CALENDAR_IF_AVAILABLE
+                                                      : XARE_NEWS_CSV_ONLY;
+   g_cfg.breakout_body_min_pct  = InpBreakoutBodyPct;
+   g_cfg.breakout_strong_atr    = InpBreakoutStrongATR;
+   g_cfg.health_check_enabled   = InpHealthCheck;
+
    g_perf.Init(g_cfg);  // §17/§39 rolling stats (abstains until sample ready)
    if(!g_res.Init(g_cfg.mode == XARE_MODE_RESEARCH, g_cfg.journal_dir))
       g_log.Warn("INIT", "research CSV unavailable — continuing without it");
    SXareSymbolProps props;
    g_md.GetProps(props);
    g_risk.Init(g_cfg, props);   // anchors equity/day/week at init
+
+   // --- §20 state persistence: restore BEFORE deciding anything else ---
+   bool tester = (MQLInfoInteger(MQL_TESTER) != 0);
+   g_state.Init(g_cfg.journal_dir, /*enabled=*/!tester);
+   if(g_state.Enabled())
+     {
+      SXarePersistedState ps;
+      string restore_err = "";
+      if(g_state.Load(ps, restore_err))
+        {
+         string note = "";
+         if(g_risk.RestoreAnchors(ps.day_key, ps.week_key,
+                                  ps.day_start_equity, ps.week_start_equity,
+                                  ps.peak_equity, ps.init_equity,
+                                  ps.trades_today, ps.consec_losses,
+                                  ps.consec_losing_days,
+                                  ps.cooldown_until, ps.post_sl_until,
+                                  ps.slip_until, ps.trades_session,
+                                  ps.session_name, ps.lock_floor,
+                                  ps.friday_close_done != 0, note))
+           {
+            g_log.Info("STATE", StringFormat("restored: day_key=%I64d trades_today=%d consec_losses=%d losing_days=%d lock_floor=%.2f | %s",
+                       ps.day_key, ps.trades_today, ps.consec_losses,
+                       ps.consec_losing_days, ps.lock_floor,
+                       (StringLen(restore_err) > 0 ? restore_err : note)));
+           }
+         else
+            g_log.Warn("STATE", StringFormat("anchors not restored (%s) — fresh init kept", note));
+         //--- §20: adopt the open position's management context if present
+         if(ps.pos_present != 0 && ps.pos_ticket > 0)
+           {
+            string adopt_note = "";
+            if(g_pos.AdoptPersisted(ps.pos_ticket, ps.pos_state,
+                                    ps.pos_direction, ps.pos_volume_initial,
+                                    ps.pos_volume_current, ps.pos_entry_price,
+                                    ps.pos_sl_price, ps.pos_tp_price,
+                                    ps.pos_risk_pct_at_entry,
+                                    ps.pos_score_at_entry,
+                                    (ENUM_XARE_SETUP)ps.pos_setup,
+                                    ps.pos_session, ps.pos_regime,
+                                    ps.pos_open_reason, ps.pos_open_time,
+                                    ps.pos_open_bar_time, ps.pos_bars_in_trade,
+                                    ps.pos_be_done != 0, ps.pos_partial_done != 0,
+                                    adopt_note))
+               g_log.Info("STATE", "position context adopted: " + adopt_note);
+            else
+               g_log.Warn("STATE", "position context not adopted: " + adopt_note);
+           }
+        }
+      else
+         g_log.Info("STATE", StringFormat("no prior state (%s) — starting fresh", restore_err));
+     }
+
    if(g_risk.Ready())
       g_log.Info("RISK", StringFormat("risk anchors set | equity=%.2f risk/trade=%.2f%% daily_limit=%.2f%%",
                  AccountInfoDouble(ACCOUNT_EQUITY), g_cfg.risk_per_trade_pct,
@@ -458,8 +573,28 @@ int OnInit()
    g_log.Info("INIT", StringFormat("engines ready | props.valid=%s min_history=%d mtf=H4+H1+%s",
               props.valid ? "true" : "false", g_cfg.history_bars_min, g_tf_label));
 
+   // --- §21 startup health check: every domain checked, one verdict ----
+   //--- (reaching this point means engine Init() calls succeeded — those
+   //--- failures return INIT_FAILED earlier; checks below probe runtime state)
+   g_health.Record(XARE_HC_DATA,      (Bars(g_symbol, _Period) > 0), "no bars available for symbol/timeframe");
+   g_health.Record(XARE_HC_INDICATORS,true, "");   // init-verified (INIT_FAILED otherwise)
+   g_health.Record(XARE_HC_SYMBOL,    props.valid, "symbol properties invalid");
+   g_health.Record(XARE_HC_BROKER,    (TerminalInfoInteger(TERMINAL_CONNECTED) != 0), "terminal not connected");
+   g_health.Record(XARE_HC_MARGIN,    (AccountInfoDouble(ACCOUNT_MARGIN_FREE) >= 0.0), "free margin unavailable");
+   g_health.Record(XARE_HC_PERMISSION,(SymbolInfoInteger(g_symbol, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_FULL),
+                   "symbol trade mode is not FULL");
+   g_health.Record(XARE_HC_NEWS,      true, "");   // news is fail-safe by design (§14)
+   g_health.Record(XARE_HC_TIME,      (TimeCurrent() > 0), "server time unavailable");
+   g_health.Record(XARE_HC_RISK,      g_risk.Ready(), "risk engine has no equity anchor");
+   g_health.Record(XARE_HC_EXECUTION, true, "");   // armed; failures latch later
+   g_health.Record(XARE_HC_STATE,     true, "");   // tester-safe no-op when disabled
+   g_health.Record(XARE_HC_LOGGING,   true, "");   // Print fallback always available
+   g_health_verdict = g_health.Finalize(true);
+   if(g_health_verdict == XARE_HEALTH_BLOCKED)
+      g_log.Warn("INIT", "health BLOCKED — sends refused until issues resolve (signals still evaluated)");
+
    // 6) dashboard
-   g_ui.Init(g_cfg.dashboard_enabled, "v0.12.0");
+   g_ui.Init(g_cfg.dashboard_enabled, "v0.17.0");
 
    g_init_ok = true;
    g_log.Info("INIT", StringFormat("initialization complete (all engines live; safety gate active; news filter %s; research CSV %s)",
@@ -472,6 +607,34 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    g_log.Info("INIT", StringFormat("deinit reason=%d", reason));
+   //--- §20: persist state so a restart restores counters/anchors/position ctx
+   if(g_state.Enabled() && g_risk.Ready())
+     {
+      SXarePersistedState ps;
+      XareResetPersistedState(ps);
+      ps.day_key        = g_risk.DayKeyForPersist();
+      ps.week_key       = g_risk.WeekKeyForPersist();
+      ps.day_start_equity  = g_risk.DayStartEquityForPersist();
+      ps.week_start_equity = g_risk.WeekStartEquityForPersist();
+      ps.peak_equity       = g_risk.PeakEquityForPersist();
+      ps.init_equity       = g_risk.InitEquity();
+      ps.trades_today      = g_risk.TradesToday();
+      ps.consec_losses     = g_risk.ConsecutiveLosses();
+      ps.consec_losing_days= g_risk.ConsecLosingDays();
+      ps.cooldown_until    = g_risk.CooldownUntilForPersist();
+      ps.post_sl_until     = g_risk.PostSLUntilForPersist();
+      ps.slip_until        = g_risk.SlipUntilForPersist();
+      ps.trades_session    = g_risk.TradesSession();
+      ps.session_name      = g_risk.SessionName();
+      ps.lock_floor        = g_risk.LockFloor();
+      ps.friday_close_done = g_risk.FridayCloseDone() ? 1 : 0;
+      g_pos.Persisted(ps);
+      string save_err = "";
+      if(g_state.Save(ps, save_err))
+         g_log.Info("STATE", "state saved");
+      else
+         g_log.Warn("STATE", "state save failed: " + save_err);
+     }
    g_mtf.Release();          // MTF EMA handles (§64)
    g_ind.Release();          // indicator handles (§64)
    g_ui.Deinit();
@@ -666,9 +829,9 @@ void RunSelfTest()
    if(XareRiskStateFromDD(16.0, 5.0, 10.0, 15.0) != XARE_RISK_HALTED)  { failed++; Print("SELFTEST FAIL T13 state-halt"); }
 
    // effective risk scales DOWN only; HALTED is a hard zero (§31)
-   if(MathAbs(XareEffectiveRiskPct(XARE_RISK_REDUCED, 0.5, 0.5, 0.25) - 0.125) > 1e-9)
+   if(MathAbs(XareEffectiveRiskPct(XARE_RISK_REDUCED, 0.5, 0.5, 0.25, 0.5) - 0.125) > 1e-9)
       { failed++; Print("SELFTEST FAIL T13 eff-risk"); }
-   if(XareEffectiveRiskPct(XARE_RISK_HALTED, 0.5, 0.5, 0.25) != 0.0)
+   if(XareEffectiveRiskPct(XARE_RISK_HALTED, 0.5, 0.5, 0.25, 0.5) != 0.0)
       { failed++; Print("SELFTEST FAIL T13 halted-zero"); }
 
    // stop distances: hybrid = max(ATR x mult, structure); floor respected
@@ -920,7 +1083,139 @@ void RunSelfTest()
    if(scT.Score(d12d, ft, mt, stp, lq, XARE_SESS_LONDON, 50.0, s12d))
       { failed++; Print("SELFTEST FAIL T12 no-signal-not-scored"); }
 
-   if(failed==0) Print("XARE SELF-TEST: PASS (15 groups)");
+   // T16 (v0.17): adaptive-risk bounds — product never exceeds base, each
+   // factor clamped to [factor_min, 1.0], N/A factors (<=0) skipped.
+   // base=0.5%, all factors 1.0 → unchanged.
+   if(MathAbs(XareAdaptiveRiskPct(0.5, 0.5, 1.0,1.0,1.0,1.0,1.0,1.0,1.0) - 0.5) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T16 identity"); }
+   // one 0.5 factor halves; product of 0.5×0.5 = 0.25 → quarter risk
+   if(MathAbs(XareAdaptiveRiskPct(0.5, 0.5, 0.5,1.0,1.0,1.0,1.0,1.0,1.0) - 0.25) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T16 halving"); }
+   if(MathAbs(XareAdaptiveRiskPct(0.5, 0.5, 0.5,0.5,1.0,1.0,1.0,1.0,1.0) - 0.125) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T16 quarter"); }
+   // factor below floor clamps up to floor (0.2 -> 0.5)
+   if(MathAbs(XareAdaptiveRiskPct(0.5, 0.5, 0.2,1.0,1.0,1.0,1.0,1.0,1.0) - 0.25) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T16 floor-clamp"); }
+   // factor >1.0 clamps down to 1.0 (never amplifies)
+   if(MathAbs(XareAdaptiveRiskPct(0.5, 0.5, 2.0,1.0,1.0,1.0,1.0,1.0,1.0) - 0.5) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T16 never-amplify"); }
+   // N/A factors (0) are skipped, not zeroing
+   if(MathAbs(XareAdaptiveRiskPct(0.5, 0.5, 0.0,0.0,0.0,0.5,0.0,0.0,1.0) - 0.25) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T16 na-skip"); }
+   // degenerate base
+   if(XareAdaptiveRiskPct(0.0, 0.5, 1.0,1.0,1.0,1.0,1.0,1.0,1.0) != 0.0)
+      { failed++; Print("SELFTEST FAIL T16 zero-base"); }
+
+   // T17 (v0.17): state encode/parse round-trip + JSON escaping
+   SXarePersistedState ps1; XareResetPersistedState(ps1);
+   ps1.day_key = 20000; ps1.trades_today = 2; ps1.consec_losses = 1;
+   ps1.consec_losing_days = 1; ps1.lock_floor = 105.5;
+   ps1.cooldown_until = D'2026.09.15 10:00'; ps1.post_sl_until = D'2026.09.15 11:00';
+   ps1.session_name = "LONDON"; ps1.friday_close_done = 1;
+   ps1.pos_present = 1; ps1.pos_ticket = 123456789; ps1.pos_direction = 1;
+   ps1.pos_volume_initial = 0.08; ps1.pos_entry_price = 2000.55;
+   ps1.pos_open_reason = "reason with \"quotes\" and \\ slash";
+   ps1.pos_setup = (int)XARE_SETUP_BREAKOUT; ps1.pos_be_done = 1;
+   string enc = XareStateEncode(ps1);
+   SXarePersistedState ps2;
+   if(!XareStateParse(enc, ps2))
+      { failed++; Print("SELFTEST FAIL T17 round-trip parse"); }
+   else
+     {
+      if(ps2.day_key != 20000 || ps2.trades_today != 2 || ps2.consec_losses != 1 ||
+         ps2.consec_losing_days != 1 || MathAbs(ps2.lock_floor - 105.5) > 1e-9 ||
+         ps2.cooldown_until != D'2026.09.15 10:00' ||
+         ps2.post_sl_until  != D'2026.09.15 11:00' ||
+         ps2.session_name != "LONDON" || ps2.friday_close_done != 1 ||
+         ps2.pos_ticket != 123456789 || ps2.pos_direction != 1 ||
+         MathAbs(ps2.pos_volume_initial - 0.08) > 1e-9 ||
+         MathAbs(ps2.pos_entry_price - 2000.55) > 1e-9 ||
+         ps2.pos_open_reason != "reason with \"quotes\" and \\ slash" ||
+         (ENUM_XARE_SETUP)ps2.pos_setup != XARE_SETUP_BREAKOUT || ps2.pos_be_done != 1)
+        { failed++; Print("SELFTEST FAIL T17 field mismatch"); }
+     }
+   // corrupt text must NOT parse
+   SXarePersistedState ps3;
+   if(XareStateParse("{ \"garbage\": true", ps3))
+      { failed++; Print("SELFTEST FAIL T17 corrupt-reject"); }
+
+   // T18 (v0.17): Friday cutoff + weekend predicate
+   if(XareWeekendState(5, 1199, 1200, 0) != XARE_WKEND_NONE)
+      { failed++; Print("SELFTEST FAIL T18 friday-before"); }
+   if(XareWeekendState(5, 1200, 1200, 0) != XARE_WKEND_FRIDAY_CUTOFF)
+      { failed++; Print("SELFTEST FAIL T18 friday-at"); }
+   if(XareWeekendState(6, 600, 1200, 0) != XARE_WKEND_WEEKEND)
+      { failed++; Print("SELFTEST FAIL T18 saturday"); }
+   if(XareWeekendState(0, 100, 1200, 0) != XARE_WKEND_NONE)
+      { failed++; Print("SELFTEST FAIL T18 sunday-no-floor"); }
+   if(XareWeekendState(3, 500, 1200, 0) != XARE_WKEND_NONE)
+      { failed++; Print("SELFTEST FAIL T18 wednesday"); }
+
+   // T19 (v0.17): health aggregation
+   SXareHealthCheck hc_arr[12];
+   for(int hi = 0; hi < 12; hi++) { hc_arr[hi].ok = true; hc_arr[hi].reason = ""; }
+   string hc_why = "";
+   if(XareHealthAggregate(hc_arr, 12, hc_why) != XARE_HEALTH_READY)
+      { failed++; Print("SELFTEST FAIL T19 all-pass"); }
+   hc_arr[3].ok = false; hc_arr[3].reason = "BROKER: down";
+   if(XareHealthAggregate(hc_arr, 12, hc_why) != XARE_HEALTH_BLOCKED ||
+      StringFind(hc_why, "BROKER: down") < 0)
+      { failed++; Print("SELFTEST FAIL T19 one-fail"); }
+   if(XareHealthAggregate(hc_arr, 0, hc_why) != XARE_HEALTH_UNKNOWN)
+      { failed++; Print("SELFTEST FAIL T19 empty"); }
+
+   // T20 (v0.17): stage ladder + profit-lock floor math
+   if(XareStageForEquity(100.0, 500,5000,50000, false) != XARE_STAGE_MICRO)
+      { failed++; Print("SELFTEST FAIL T20 micro"); }
+   if(XareStageForEquity(999.0, 500,5000,50000, false) != XARE_STAGE_GROWTH)
+      { failed++; Print("SELFTEST FAIL T20 growth"); }
+   if(XareStageForEquity(5001.0, 500,5000,50000, false) != XARE_STAGE_STANDARD)
+      { failed++; Print("SELFTEST FAIL T20 standard"); }
+   if(XareStageForEquity(60000.0, 500,5000,50000, false) != XARE_STAGE_SCALE)
+      { failed++; Print("SELFTEST FAIL T20 scale"); }
+   if(XareStageForEquity(60000.0, 500,5000,50000, true) != XARE_STAGE_DEFENSIVE)
+      { failed++; Print("SELFTEST FAIL T20 defensive-override"); }
+   if(MathAbs(XareStageRiskFactor(XARE_STAGE_DEFENSIVE, 0.5) - 0.5) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T20 defensive-factor"); }
+   if(XareStageRiskFactor(XARE_STAGE_GROWTH, 0.5) != 1.0)
+      { failed++; Print("SELFTEST FAIL T20 neutral-factor"); }
+   // lock floor: init 100, milestone +10%, protect 50% of gain -> floor 105
+   if(MathAbs(XareLockFloorValue(100.0, 10.0, 50.0) - 105.0) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T20 lock-floor"); }
+   if(XareLockFloorValue(100.0, 0.0, 50.0) != 0.0)
+      { failed++; Print("SELFTEST FAIL T20 lock-off"); }
+
+   // T21 (v0.17): regime-strategy matrix incl. DEFENSIVE bans
+   if(!XareSetupAllowedInRegime(XARE_SETUP_BREAKOUT, XARE_REGIME_TREND_UP, XARE_RISK_NORMAL))
+      { failed++; Print("SELFTEST FAIL T21 breakout-trend"); }
+   if(XareSetupAllowedInRegime(XARE_SETUP_RANGE_REVERSAL, XARE_REGIME_TREND_UP, XARE_RISK_NORMAL))
+      { failed++; Print("SELFTEST FAIL T21 range-not-in-trend"); }
+   if(XareSetupAllowedInRegime(XARE_SETUP_BREAKOUT, XARE_REGIME_UNSAFE, XARE_RISK_NORMAL))
+      { failed++; Print("SELFTEST FAIL T21 unsafe-block"); }
+   if(XareSetupAllowedInRegime(XARE_SETUP_LIQUIDITY_SWEEP_REVERSAL,
+                               XARE_REGIME_RANGE, XARE_RISK_DEFENSIVE))
+      { failed++; Print("SELFTEST FAIL T21 defensive-ban"); }
+   if(!XareSetupAllowedInRegime(XARE_SETUP_TREND_PULLBACK,
+                                XARE_REGIME_TREND_UP, XARE_RISK_DEFENSIVE))
+      { failed++; Print("SELFTEST FAIL T21 defensive-allows-trend"); }
+
+   // T22 (v0.17): breakout strength banding + body criterion
+   if(XareBreakoutStrength(0.05, 0.5) != 0)  { failed++; Print("SELFTEST FAIL T22 weak"); }
+   if(XareBreakoutStrength(0.30, 0.5) != 1)  { failed++; Print("SELFTEST FAIL T22 normal"); }
+   if(XareBreakoutStrength(0.60, 0.5) != 2)  { failed++; Print("SELFTEST FAIL T22 strong"); }
+   if(XareBreakoutStrength(0.60, 0.0) != 1)  { failed++; Print("SELFTEST FAIL T22 no-strong-threshold"); }
+   if(!XareBreakoutBodyOK(2000.0, 2006.0, 1999.0, 2005.5, 50.0))   // body 5.5/7 = 78%
+      { failed++; Print("SELFTEST FAIL T22 body-ok"); }
+   if(XareBreakoutBodyOK(2000.0, 2006.0, 1999.0, 2003.0, 50.0))    // body 3/7 = 43%
+      { failed++; Print("SELFTEST FAIL T22 body-weak"); }
+   // min-lot risk math (§7): 0.01 lot, SL 3000pt ($3.00 price), $0.10/pt/lot
+   // -> 0.01*3000*0.10 = $3.00 at risk = 6% of $50 equity
+   SXareSymbolProps mp; ZeroMemory(mp); mp.valid = true;
+   mp.volume_min = 0.01; mp.point = 0.001; mp.tick_size = 0.001; mp.tick_value = 0.10;
+   if(MathAbs(XareMinLotRiskPct(50.0, 3000.0, mp) - 6.0) > 1e-9)   // $3/$50
+      { failed++; Print("SELFTEST FAIL T22 minlot-risk"); }
+
+   if(failed==0) Print("XARE SELF-TEST: PASS (22 groups)");
    else          Print("XARE SELF-TEST: FAIL (", failed, " checks)");
   }
 
@@ -987,6 +1282,17 @@ bool TrySendPlan(const SXareTradeDecision &plan, const datetime bar_time,
                            == SYMBOL_TRADE_MODE_FULL);
    sc.equity            = rs.equity;
    sc.margin_ok         = true;   // plan-level margin budget check already passed
+   //--- v0.17.0 hardening context
+   sc.health            = g_health_verdict;
+   sc.health_reasons    = g_health.Reasons();
+   sc.weekend           = g_weekend_state;
+   sc.post_sl_cooldown  = g_risk.PostSLCooldownActive(TimeCurrent());
+   sc.slip_cooldown     = g_risk.SlipCooldownActive(TimeCurrent());
+   sc.trades_session    = g_risk.TradesSession();
+   sc.max_trades_session= g_cfg.max_trades_per_session;
+   sc.margin_level_pct  = rs.margin_level_pct;
+   sc.min_margin_level_pct = g_cfg.min_margin_level_pct;
+   sc.floor_breached    = rs.floor_breached;
 
    ENUM_XARE_BLOCK_REASON br;
    string bd;
@@ -1006,6 +1312,17 @@ bool TrySendPlan(const SXareTradeDecision &plan, const datetime bar_time,
          DoubleToString(res.fill_price, props.digits), res.slippage_points));
       g_pos.OnOpened(plan, res, bar_time, regime_label);
       g_risk.CountTradeOpened();
+      g_risk.CountSessionTrade(g_sess_cache);   // §12 per-session cap
+      //--- §12: abnormal slippage arms its cooldown
+      if(g_cfg.slip_cooldown_points > 0.0 &&
+         res.slippage_points >= g_cfg.slip_cooldown_points)
+        {
+         g_risk.ArmSlipCooldown(bar_time);
+         g_log.Warn("EXEC", StringFormat("slippage %.1fpt >= %.1fpt — slip cooldown armed (%d bars)",
+                    res.slippage_points, g_cfg.slip_cooldown_points,
+                    g_cfg.slip_cooldown_bars));
+        }
+      g_state.MarkDirty();
       return true;
      }
    g_log.Warn("EXEC", StringFormat("send failed: %s", res.comment));
@@ -1077,9 +1394,11 @@ void CheckPositionClosed(const SXareSymbolProps &props)
                     rec.exit_price, XareExitToString(rec.reason),
                     rec.session, rec.pl_money, rec.r_multiple,
                     rec.bars_in_trade, rec.slippage_points, rec.open_reason);
-   g_risk.OnTradeClosed(rec.pl_money, rec.close_time);
+   g_risk.OnTradeClosed(rec.pl_money, rec.close_time,
+                        rec.reason == XARE_EXIT_HARD_SL);   // §12 post-SL hook
    g_perf.OnTradeClosed(rec.r_multiple, rec.pl_money);   // §17/§39 stats
    g_perf.LogSnapshot(&g_log);
+   g_state.MarkDirty();
   }
 
 //+------------------------------------------------------------------+
@@ -1190,9 +1509,24 @@ void ProcessBar()
       prev_roc = XareRateOfChange(c_now, c_prev);
 
    // --- M11: manage any open position FIRST (uses this bar's verdicts) --
+   //--- §12 breakout tick-activity context: average tick volume over the
+   //--- recent window (0 when bars are unavailable — criterion auto-skips)
+   double avg_tick_vol = 0.0;
+   {
+      long tv_sum = 0; int tv_n = 0;
+      for(int si = 2; si <= 21; si++)
+        {
+         long v = iVolume(g_symbol, _Period, si);   // tick volume (MQL5 convention)
+         if(v > 0) { tv_sum += v; tv_n++; }
+        }
+      if(tv_n > 0) avg_tick_vol = (double)tv_sum / tv_n;
+   }
+   ENUM_XARE_RISK_STATE sig_health = g_risk.Ready()
+                                     ? g_risk.State() : XARE_RISK_NORMAL;
    int new_signal_dir = 0;
    SXareDecision decision;
-   g_sig.Evaluate(regime, mtf, structure, session, liq, bar, f, prev_roc, decision);
+   g_sig.Evaluate(regime, mtf, structure, session, liq, bar, f, prev_roc,
+                  sig_health, avg_tick_vol, decision);
    new_signal_dir = decision.has_signal ? decision.direction : 0;
    g_last_decision = decision;
    g_have_decision = true;
@@ -1208,6 +1542,57 @@ void ProcessBar()
       g_safety.ArmEmergency("5+ consecutive execution failures");
    if(g_have_plan && g_last_plan.volume > g_cfg.emergency_max_lot_x1000 / 1000.0 + 1e-9)
       g_safety.ArmEmergency("planned volume exceeded the emergency lot ceiling");
+
+   // --- v0.17.0 hardening: weekend state + circuit-breaker log lines -----
+   MqlDateTime now_dt;
+   TimeToStruct(TimeCurrent(), now_dt);
+   int minute_of_day_now = now_dt.hour * 60 + now_dt.min;
+   g_weekend_state = XareWeekendState(now_dt.day_of_week, minute_of_day_now,
+                                      g_cfg.friday_cutoff_min, 0);
+
+   //--- §11: one-time TRADING HALTED log lines (dedup per episode)
+   if(g_risk.Ready())
+     {
+      bool d_breach = g_risk.DailyLossBreached();
+      bool w_breach = g_risk.WeeklyLossBreached();
+      if(d_breach && !g_daily_halt_logged)
+        {
+         PrintFormat("TRADING HALTED — REASON: daily loss limit %.2f%% reached (new entries blocked)",
+                     g_cfg.daily_loss_limit_pct);
+         g_daily_halt_logged = true;
+        }
+      else if(!d_breach)
+         g_daily_halt_logged = false;      // day rolled / recovered
+      if(w_breach && !g_weekly_halt_logged)
+        {
+         PrintFormat("TRADING HALTED — REASON: weekly loss limit %.2f%% reached (new entries blocked)",
+                     g_cfg.weekly_loss_limit_pct);
+         g_weekly_halt_logged = true;
+        }
+      else if(!w_breach)
+         g_weekly_halt_logged = false;
+     }
+
+   //--- §15: optional Friday close-all at the cutoff (default OFF)
+   if(g_cfg.friday_close_all && g_weekend_state == XARE_WKEND_FRIDAY_CUTOFF &&
+      !g_risk.FridayCloseDone() && open_cnt_now > 0)
+     {
+      SXareMgmtOrder mo;
+      mo.action       = XARE_MGMT_CLOSE_FULL;
+      mo.close_volume = 0.0;
+      mo.reason       = "FRIDAY CUTOFF: weekend gap protection (config)";
+      SXareExecutionResult res;
+      if(g_exec.ApplyManagement(mo, g_pos.Ticket(), res))
+        {
+         g_pos.OnManagementApplied(mo.action, mo.reason);
+         g_risk.MarkFridayCloseDone();
+         g_log.Warn("MGMT", StringFormat("CLOSE_FULL #%I64u: %s",
+                    g_pos.Ticket(), mo.reason));
+         g_state.MarkDirty();
+        }
+      else
+         g_log.Warn("MGMT", StringFormat("friday close-all failed: %s", res.comment));
+     }
 
    // --- M8: score the decision (0–100, every component logged) -----------
    bool have_score = false;
@@ -1250,8 +1635,27 @@ void ProcessBar()
       // --- M10: build the fully priced trade plan ------------------------
       double bid10 = 0.0, ask10 = 0.0;
       g_md.Quotes(bid10, ask10);
+      //--- §6 adaptive risk: base, scaled by the DD-state ladder, then the
+      //--- bounded factor product (each factor clamped [factor_min, 1.0];
+      //--- result can never exceed the state-scaled base).
       double eff_risk = g_risk.Ready() ? g_risk.EffectiveRiskPct()
                                        : 0.0;   // no risk anchor = no risk
+      if(eff_risk > 0.0)
+        {
+         //--- stage factor applies ONCE (DEFENSIVE halving is already inside
+         //--- the state ladder via EffectiveRiskPct; the stage factor is the
+         //--- §8 equity-stage research hook, neutral 1.0 until validated)
+         double stage_factor = XareStageRiskFactor(g_risk.Stage(),
+                                                   g_cfg.risk_mult_defensive);
+         eff_risk = XareAdaptiveRiskPct(eff_risk, g_cfg.factor_min,
+                                        /*quality*/     0.0,   // N/A: band gate owns quality
+                                        /*regime*/      0.0,   // N/A: matrix owns regime
+                                        /*volatility*/  0.0,   // N/A: SL/TP adapt via ATR
+                                        /*health*/      0.0,   // already applied via state ladder
+                                        /*drawdown*/    0.0,   // already applied via state
+                                        /*performance*/ 0.0,   // N/A until expectancy data
+                                        /*stage*/       stage_factor);
+        }
       SXareRiskSnapshot snap = g_risk.Snapshot();
       SXareTradeDecision plan;
       XareBuildTradePlan(decision, score.total, bid10, ask10, props, g_cfg,
@@ -1448,7 +1852,7 @@ void OnTick()
      }
 
    CXareDiagnostics::PanelData pd;
-   pd.version         = "v0.15.0";
+   pd.version         = "v0.17.0";
    pd.connected       = (TerminalInfoInteger(TERMINAL_CONNECTED) != 0);
    pd.symbol          = g_symbol;
    pd.timeframe       = g_tf_label;
@@ -1474,6 +1878,18 @@ void OnTick()
    pd.action          = (open_xare > 0) ? "MANAGE POSITION"
                         : (StringLen(notrade) > 0 ? "WAIT — see NO TRADE line"
                                                   : "WAIT FOR SETUP");
+   //--- v0.17.0 panel additions
+   pd.account         = StringFormat("%I64d %s",
+                        AccountInfoInteger(ACCOUNT_LOGIN),
+                        AccountInfoString(ACCOUNT_NAME));
+   MqlDateTime srv_dt;
+   TimeToStruct(TimeCurrent(), srv_dt);
+   pd.server_time     = StringFormat("%02d:%02d", srv_dt.hour, srv_dt.min);
+   pd.stage           = (g_risk.Ready() && g_cfg.stages_enabled)
+                        ? XareStageToString(g_risk.Stage()) : "-";
+   pd.weekly_pl       = g_risk.Ready() ? g_risk.Snapshot().weekly_pl : 0.0;
+   pd.margin_level    = g_risk.Ready() ? g_risk.Snapshot().margin_level_pct : 0.0;
+   pd.health          = XareHealthToString(g_health_verdict);
    g_ui.Update(pd);
   }
 //+------------------------------------------------------------------+

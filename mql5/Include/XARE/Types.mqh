@@ -196,13 +196,51 @@ enum ENUM_XARE_SETUP
    XARE_SETUP_LIQUIDITY_SWEEP_REVERSAL
   };
 
-//--- risk states (spec §25)
+//--- risk states (spec §25 + §10 hardening). Severity order matters:
+//--- NORMAL < CAUTION < REDUCED < DEFENSIVE < HALTED (see XareRiskSeverity).
 enum ENUM_XARE_RISK_STATE
   {
    XARE_RISK_NORMAL = 0,
    XARE_RISK_CAUTION,
    XARE_RISK_REDUCED,
+   XARE_RISK_DEFENSIVE,      // §10: survival state (weekly loss / losing days /
+                             // margin level / profit-floor breach)
    XARE_RISK_HALTED          // latch: requires EA re-init to clear
+  };
+
+//--- account survival / startup-health verdict (§21 hardening)
+enum ENUM_XARE_HEALTH
+  {
+   XARE_HEALTH_UNKNOWN = 0,
+   XARE_HEALTH_READY,        // all startup checks passed
+   XARE_HEALTH_BLOCKED       // at least one check failed — sends refused
+  };
+
+//--- capital stages (§8 hardening): RESEARCH-ONLY labeling. Equity ladder
+//--- MICRO..SCALE is informational; DEFENSIVE overrides from the health
+//--- state. Stages may only ever REDUCE risk (multipliers default 1.0).
+enum ENUM_XARE_STAGE
+  {
+   XARE_STAGE_MICRO = 0,
+   XARE_STAGE_GROWTH,
+   XARE_STAGE_STANDARD,
+   XARE_STAGE_SCALE,
+   XARE_STAGE_DEFENSIVE      // health-driven override, not an equity bucket
+  };
+
+//--- weekend/Friday protection state (§15 hardening)
+enum ENUM_XARE_WEEKEND
+  {
+   XARE_WKEND_NONE = 0,
+   XARE_WKEND_FRIDAY_CUTOFF, // after the Friday final-entry cutoff
+   XARE_WKEND_WEEKEND        // weekend / pre-Sunday-open: no entries
+  };
+
+//--- news data source (§14 hardening): native MT5 calendar with CSV fallback
+enum ENUM_XARE_NEWS_SOURCE
+  {
+   XARE_NEWS_CSV_ONLY = 0,
+   XARE_NEWS_CALENDAR_IF_AVAILABLE   // falls back to CSV / fail-safe clear
   };
 
 //--- exit reasons (spec §22/§30); every exit must map to one of these
@@ -266,7 +304,12 @@ enum ENUM_XARE_BLOCK_REASON
    XARE_BR_EXEC_FAILURE,         // execution failure streak latch
    XARE_BR_DATA_STALE,           // market data staleness beyond tolerance
    XARE_BR_SL_INVALID,           // no acceptable hard SL could be built
-   XARE_BR_TP_INVALID            // no acceptable TP could be built
+   XARE_BR_TP_INVALID,           // no acceptable TP could be built
+   XARE_BR_HEALTH,               // startup health verdict BLOCKED (§21)
+   XARE_BR_WEEKEND,              // Friday entry cutoff / weekend (§15)
+   XARE_BR_MARGIN_LEVEL,         // account margin level below floor (§10)
+   XARE_BR_COOLDOWN_SLIP,        // post-abnormal-slippage cooldown (§12)
+   XARE_BR_MAX_TRADES_SESSION    // per-session trade cap (§12)
   };
 
 //--- stop-loss / take-profit construction policies (spec §20/§21)
@@ -389,7 +432,7 @@ struct SXareExecutionResult
    string           comment;
   };
 
-//--- risk-engine snapshot for logs + dashboard (spec §24/§25)
+//--- risk-engine snapshot for logs + dashboard (spec §24/§25 + §10 hardening)
 struct SXareRiskSnapshot
   {
    bool             ready;
@@ -405,6 +448,13 @@ struct SXareRiskSnapshot
    int              consecutive_losses;
    bool             cooldown_active;
    datetime         cooldown_until;
+   //--- v0.17.0 hardening (§8-§11)
+   double           weekly_pl;       // equity − week_start (incl. floating)
+   double           margin_level_pct;// ACCOUNT_MARGIN_LEVEL (0 = no positions)
+   int              consec_losing_days;
+   double           protected_floor; // §9 profit lock (0 = none armed)
+   bool             floor_breached;  // equity below the protected floor
+   ENUM_XARE_STAGE  stage;           // §8 capital stage (research label)
   };
 
 //--- open position context kept by the PositionManager
@@ -465,11 +515,65 @@ string XareRiskStateToString(const ENUM_XARE_RISK_STATE s)
   {
    switch(s)
      {
-      case XARE_RISK_NORMAL:  return "NORMAL";
-      case XARE_RISK_CAUTION: return "CAUTION";
-      case XARE_RISK_REDUCED: return "REDUCED_RISK";
-      case XARE_RISK_HALTED:  return "HALTED";
-      default:                return "NORMAL";
+      case XARE_RISK_NORMAL:    return "NORMAL";
+      case XARE_RISK_CAUTION:   return "CAUTION";
+      case XARE_RISK_REDUCED:   return "REDUCED_RISK";
+      case XARE_RISK_DEFENSIVE: return "DEFENSIVE";
+      case XARE_RISK_HALTED:    return "HALTED";
+      default:                  return "NORMAL";
+     }
+  }
+
+//--- severity ranking for state comparison (higher = more restrictive)
+int XareRiskSeverity(const ENUM_XARE_RISK_STATE s)
+  {
+   switch(s)
+     {
+      case XARE_RISK_CAUTION:   return 1;
+      case XARE_RISK_REDUCED:   return 2;
+      case XARE_RISK_DEFENSIVE: return 3;
+      case XARE_RISK_HALTED:    return 4;
+      default:                  return 0;
+     }
+  }
+
+//--- more restrictive of two states
+ENUM_XARE_RISK_STATE XareRiskStateWorst(const ENUM_XARE_RISK_STATE a,
+                                        const ENUM_XARE_RISK_STATE b)
+  {
+   return (XareRiskSeverity(a) >= XareRiskSeverity(b)) ? a : b;
+  }
+
+string XareHealthToString(const ENUM_XARE_HEALTH h)
+  {
+   switch(h)
+     {
+      case XARE_HEALTH_READY:   return "READY";
+      case XARE_HEALTH_BLOCKED: return "BLOCKED";
+      default:                  return "UNKNOWN";
+     }
+  }
+
+string XareStageToString(const ENUM_XARE_STAGE s)
+  {
+   switch(s)
+     {
+      case XARE_STAGE_MICRO:     return "MICRO";
+      case XARE_STAGE_GROWTH:    return "GROWTH";
+      case XARE_STAGE_STANDARD:  return "STANDARD";
+      case XARE_STAGE_SCALE:     return "SCALE";
+      case XARE_STAGE_DEFENSIVE: return "DEFENSIVE";
+      default:                   return "MICRO";
+     }
+  }
+
+string XareWeekendToString(const ENUM_XARE_WEEKEND w)
+  {
+   switch(w)
+     {
+      case XARE_WKEND_FRIDAY_CUTOFF: return "FRIDAY_CUTOFF";
+      case XARE_WKEND_WEEKEND:       return "WEEKEND";
+      default:                       return "NONE";
      }
   }
 
@@ -530,6 +634,11 @@ string XareBlockReasonToString(const ENUM_XARE_BLOCK_REASON r)
       case XARE_BR_DATA_STALE:        return "DATA_STALE";
       case XARE_BR_SL_INVALID:        return "SL_INVALID";
       case XARE_BR_TP_INVALID:        return "TP_INVALID";
+      case XARE_BR_HEALTH:            return "HEALTH";
+      case XARE_BR_WEEKEND:           return "WEEKEND";
+      case XARE_BR_MARGIN_LEVEL:      return "MARGIN_LEVEL";
+      case XARE_BR_COOLDOWN_SLIP:     return "COOLDOWN_SLIP";
+      case XARE_BR_MAX_TRADES_SESSION:return "MAX_TRADES_SESSION";
       default:                        return "NONE";
      }
   }

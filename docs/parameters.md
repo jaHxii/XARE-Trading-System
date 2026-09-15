@@ -125,6 +125,32 @@ Thresholds: MinScore 60 · CandidateScore 70 · StrongScore 80.
 | NewsBlackoutBeforeMin | 30 | |
 | NewsBlackoutAfterMin | 30 | |
 | EmergencyStopOnFailures | 3 | repeated execution failures ⇒ stop |
+| NewsUseCalendar | true | MT5 Economic Calendar (HIGH, USD/XAU); CSV fallback; fail-safe clear on failure |
+
+## Hardening v0.17 (all defaults OFF or risk-reducing; HYPOTHESES)
+
+| Parameter | Default | Notes |
+|---|---|---|
+| FactorMin | 0.5 | adaptive-risk hard lower bound per factor (§6) |
+| MaxConsecLosingDays | 2 | consecutive losing days ⇒ DEFENSIVE (0=off) (§10) |
+| MinMarginLevel | 200% | margin-level floor ⇒ DEFENSIVE (0=off) (§10) |
+| ProfitLockEnabled | **false** | UNVALIDATED capital floor (§9) — do not enable before walk-forward evidence |
+| LockMilestonePct | 10 | equity gain% that arms a floor |
+| LockFloorPct | 50 | protected % of the gain |
+| StagesEnabled | true | capital-stage research labels (§8); risk factor reduce-only |
+| StageBoundaries | 500 / 5000 / 50000 | MICRO/GROWTH/STANDARD/SCALE equity bounds |
+| FridayCutoffMin | 1200 | 20:00 server: last entry START (§15) |
+| FridayCloseAll | **false** | optional close-all at cutoff |
+| PostSLCooldown | 4 bars | pause after any SL loser (§12) |
+| SlipCooldownPoints | 150 | abnormal slippage trigger (§12) |
+| SlipCooldownBars | 4 | pause length after abnormal slippage |
+| MaxTradesPerSession | 2 | per-session cap (0=off) (§12) |
+| BreakoutBodyMinPct | 50 | breakout candle body ≥ % of range (§2) |
+| BreakoutStrongATR | 0.5 | STRONG band threshold in ATR beyond level (§2) |
+| HealthCheckEnabled | true | BLOCKED verdict blocks sends (§21) |
+
+Breakout strength bands (§2, hypotheses): WEAK < 0.25 ATR ≤ NORMAL < strong_atr ≤ STRONG.
+Confidence bumps: band +0/+10/+15, body +5, DI-momentum +5, tick-activity +5 (max 80+20).
 
 ## Logging / Research
 
@@ -133,9 +159,11 @@ Thresholds: MinScore 60 · CandidateScore 70 · StrongScore 80.
 | LogLevel | INFO | DEBUG / INFO / WARN / ERROR |
 | ResearchCSVEnabled | true in RESEARCH mode | per-bar feature rows |
 | JournalCSVEnabled | true | trade journal |
-| JournalDir | MQL5\Files\XARE | |
+| JournalDir | MQL5\Files\XARE | also holds state.json (§20 persistence) |
 
 ## Session-specific and future knobs
 
 See `docs/testing.md` for acceptance thresholds and
 `python/config/acceptance.yaml` for research gates.
+Stress-scenario parameters (§18) live in `python/xare/stress.py`:
+spread ×1.5/×2, slippage 5%/10% of R per side.

@@ -171,10 +171,12 @@ void XareBuildTradePlan(const SXareDecision &dec, const double score_total,
         }
       else
         {
+         //--- §7 micro-account clarity: SAY what the minimum lot would risk.
+         double min_lot_risk = XareMinLotRiskPct(equity, sl_pts, props);
          out.block_reason = XARE_BR_VOLUME;
          out.block_detail = StringFormat(
-            "safe volume below broker minimum (risk %.3f%%, SL %.0f pts) — skip",
-            eff_risk_pct, sl_pts);
+            "MINIMUM VOLUME TOO RISKY: %.2f-lot min with SL %.0f pts would risk %.2f%% of equity (allowed %.3f%%) — NO TRADE",
+            props.volume_min, sl_pts, min_lot_risk, eff_risk_pct);
         }
       return;
      }

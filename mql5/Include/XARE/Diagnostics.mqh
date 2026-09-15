@@ -114,6 +114,13 @@ public:
       bool             trading_allowed;
       string           notrade_reason;  // full NO_TRADE explanation ("" = none)
       string           action;
+      //--- v0.17.0 hardening additions (§22)
+      string           account;         // "1012345 DEMO" / broker company
+      string           server_time;     // server clock, hh:mm
+      string           stage;           // capital stage label
+      double           weekly_pl;
+      double           margin_level;    // %, 0 = flat
+      string           health;          // READY / BLOCKED (short)
      };
 
    void              Update(const PanelData &d)
@@ -135,6 +142,8 @@ public:
       Row(r, d.symbol + " " + d.timeframe + "   candle " +
           TimeToString(d.candle_time, TIME_DATE|TIME_MINUTES), c_neut);
       r++;
+      Row(r, "ACCT " + d.account + "   SRV " + d.server_time, c_neut);
+      r++;
       Row(r, "PRICE " + DoubleToString(d.price, d.digits) +
           "   SPREAD " + IntegerToString(d.spread_points) + "pt", c_neut);
       r++;
@@ -153,17 +162,21 @@ public:
       Row(r, "  " + d.components, c_neut);
       r++;
 
-      //--- risk state: green NORMAL, gold CAUTION/REDUCED, red HALTED
-      color rkc = (d.risk_state == "NORMAL")   ? c_good :
-                  (d.risk_state == "HALTED" || d.risk_state == "CAUTION") ? c_warn :
-                  c_warn;
+      //--- risk state: green NORMAL, gold CAUTION..DEFENSIVE, red HALTED
+      color rkc = (d.risk_state == "NORMAL") ? c_good : c_warn;
       if(d.risk_state == "HALTED")
          rkc = c_bad;
-      Row(r, "RISK " + d.risk_state +
+      Row(r, "RISK " + d.risk_state + "  STAGE " + d.stage +
           "  day " + DoubleToString(d.daily_pl, 2) +
+          "  wk " + DoubleToString(d.weekly_pl, 2) +
           "  dayDD " + DoubleToString(d.daily_dd_pct, 1) + "%" +
           "  dd " + DoubleToString(d.cur_dd_pct, 1) + "%",
           (d.daily_pl >= 0.0 && d.risk_state != "HALTED") ? rkc : c_bad);
+      r++;
+      Row(r, "MARGIN-LVL " +
+          (d.margin_level > 0.0 ? DoubleToString(d.margin_level, 0) + "%" : "flat") +
+          "   HEALTH " + d.health,
+          (StringLen(d.health) > 0 && StringFind(d.health, "READY") < 0) ? c_bad : c_good);
       r++;
 
       //--- open position / flat

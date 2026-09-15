@@ -39,6 +39,10 @@ REQUIRED_FILES = [
     "mql5/Include/XARE/ExitEngine.mqh",
     "mql5/Include/XARE/SafetyEngine.mqh",
     "mql5/Include/XARE/NewsFilter.mqh",
+    "mql5/Include/XARE/ResearchLogger.mqh",
+    "mql5/Include/XARE/PerformanceTracker.mqh",
+    "mql5/Include/XARE/StateStore.mqh",
+    "mql5/Include/XARE/HealthCheck.mqh",
 ]
 
 

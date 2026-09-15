@@ -1,5 +1,84 @@
 # Changelog
 
+## [v0.17.0] — 2026-09-15 (v1.0 pre-compilation hardening pass)
+
+Review-first per spec §29: `docs/hardening_review.md` (audit A–L) written
+and approved BEFORE any code change. Approved scope = items C1–C16; rejected
+features and overfitting assessment documented in the same file. **No
+optimization was performed; no backtest results exist.**
+
+### Added — P0 survival
+- `StateStore.mqh` (§20 crash recovery): atomic JSON state file (tmp → move,
+  .bak fallback), persists risk anchors, day/week keys, streaks, all cooldown
+  deadlines, losing-days, profit-lock floor, Friday close flag, and the open
+  position's management context. Restart adoption validates against the live
+  position (direction/ticket cross-check) and NEVER resets management flags
+  (be_done/partial_done) — duplicate-management protection. Tester-safe:
+  persistence disabled inside the Strategy Tester.
+- Startup health check (§21): 12 domains (DATA/INDICATORS/SYMBOL/BROKER/
+  MARGIN/PERMISSION/NEWS/TIME/RISK/EXECUTION/STATE/LOGGING) → one
+  `XARE HEALTH: READY|BLOCKED` verdict; BLOCKED blocks sends (via the safety
+  gate, reason HEALTH) but never signal evaluation.
+- `TRADING HALTED — REASON` circuit-breaker log lines for daily/weekly
+  breaches, deduplicated per episode (§11).
+- Micro-account clarity (§7): volume refusals now print
+  `MINIMUM VOLUME TOO RISKY: <min-lot> with SL <pts> would risk <x>% — NO
+  TRADE` (computed live from broker properties, never assumed).
+
+### Added — P1 robustness
+- Adaptive risk engine (§6): `XareAdaptiveRiskPct` = base × bounded factor
+  product; every factor clamped to [factor_min, 1.0] — risk can only shrink
+  or stay, never amplify (no-loss-martingale invariant, test-enforced).
+  Factors not yet justified by data are passed as N/A and skipped.
+- DEFENSIVE account-survival state (§10) between REDUCED and HALTED: inputs
+  = consecutive losing days + margin level floor; blocks counter-trend
+  mean-reversion setups (matrix) and scales risk by the defensive
+  multiplier.
+- Profit lock / capital floor (§9): configurable milestone→floor ladder,
+  default OFF, explicitly marked UNVALIDATED; floor breach blocks sends.
+- Capital stages (§8): MICRO/GROWTH/STANDARD/SCALE + health-driven
+  DEFENSIVE; research labels; stage factor reduce-only; transitions logged.
+- Weekend/Friday engine (§15): Friday final-entry cutoff predicate (server
+  time), WEEKEND state, optional Friday close-all (default OFF).
+- Cooldown suite (§12): post-stop-loss cooldown, abnormal-slippage cooldown,
+  per-session trade cap — all additive to the existing streak cooldown.
+- MT5 Economic Calendar news engine (§14): native `CalendarValueHistory` +
+  `CalendarEventById`, HIGH-importance USD/XAU events, sliding window,
+  hourly refresh; API failure detected and degrades to the CSV filter, then
+  to fail-safe clear. Entries-only blocking (never auto-closes positions).
+- Regime-strategy matrix (§5/§23): formal `XareSetupAllowedInRegime`
+  function — the M7 implicit gates made explicit and testable, plus the
+  DEFENSIVE bans; NORMAL-path behavior verified unchanged (T9/T10 fixtures
+  untouched and passing).
+- Breakout hardening (§2): ATR-normalized strength bands (WEAK/NORMAL/STRONG)
+  feeding setup confidence, candle-body ≥ 50% of range, DI-momentum, and
+  tick-activity criteria — all coarse bands (overfitting control), all
+  documented hypotheses.
+- Dashboard (§22): account/login, server time, capital stage, weekly P/L,
+  margin level, and the health verdict line.
+
+### Added — P2 research tooling
+- `python/xare/stress.py` (§18): journal replay under spread ×1.5/×2 and
+  5%/10% per-side slippage; PF/expectancy/DD deltas with warning labels.
+- `tests/unit/test_hardening.py`: Python mirrors of SELF_TEST groups
+  T16–T22 (adaptive bounds, state round-trip, weekend, health, stages/lock,
+  matrix, breakout bands, min-lot risk).
+
+### Fixed
+- Two SELF_TEST fixture-arithmetic bugs caught by the new Python mirrors
+  before any tester run: stage-ladder boundary (4999 < 5000 ⇒ GROWTH, not
+  STANDARD) and min-lot risk (0.01 lot × 3000 pt × $0.10 = $3.00 = 6% of
+  $50, not 60%).
+- `XareAdaptiveRiskPct` used a variable-length local array (MQL5 requires
+  constant size) — caught by the compiler, fixed.
+
+### Verification (executed, not assumed)
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_v017.log`).
+- Tests: **172 passed** (134 prior + 32 hardening mirrors + stress tests;
+  layout guard extended with the two new modules).
+- Honest limitation: the send/modify/close path and all new runtime behavior
+  remain compile-verified only — no Strategy Tester or demo run has happened.
+
 ## [v0.16.0] — 2026-09-15 (M19b: real broker reference recorded)
 
 ### Added

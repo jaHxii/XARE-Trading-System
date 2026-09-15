@@ -95,6 +95,7 @@ struct SXareConfig
    bool             close_on_daily_limit;   // §24: default NO (stop opening only)
    double           risk_mult_caution;      // risk scale in CAUTION state (<=1)
    double           risk_mult_reduced;      // risk scale in REDUCED state (<=1)
+   double           risk_mult_defensive;    // risk scale in DEFENSIVE state (<=1)
    ENUM_TIMEFRAMES  working_tf;             // bar-time anchor for cooldowns
 
    // Execution (§29) + small-account guard (§49)
@@ -133,6 +134,48 @@ struct SXareConfig
    string           journal_dir;          // under MQL5\Files
    int              expectancy_min_trades;// §17: gate disabled below this sample
    double           expectancy_block_r;   // §17: block when expR <= -this AND pf<1
+
+   // === v0.17.0 hardening (§2-§22) — all defaults OFF or risk-REDUCING ===
+
+   // Adaptive risk (§6): product of bounded factors, each clamped
+   // [factor_min, 1.0] — risk can only shrink or stay. No factor can raise it.
+   double           factor_min;           // hard lower bound per factor
+
+   // Account survival (§10): DEFENSIVE state inputs
+   int              max_consec_losing_days;  // losing days -> DEFENSIVE (0=off)
+   double           min_margin_level_pct;    // margin level floor (0=off)
+
+   // Profit lock / capital floor (§9): optional, OFF by default, UNVALIDATED
+   bool             profit_lock_enabled;
+   double           lock_milestone_pct;      // equity gain% that arms a floor
+   double           lock_floor_pct;          // % of the gain protected
+
+   // Capital stages (§8): research labels; stage factor only reduces risk
+   bool             stages_enabled;
+   double           stage_micro_max_equity;      // < 500
+   double           stage_growth_max_equity;     // < 5000
+   double           stage_standard_max_equity;   // < 50000
+
+   // Weekend/Friday (§15): broker server time
+   int              friday_cutoff_min;    // minutes from midnight; final entry
+                                         // must START before this (default 1200 = 20:00)
+   bool             friday_close_all;     // §15 optional close-all at cutoff
+
+   // Cooldown suite (§12): additive to the existing streak cooldown
+   int              post_sl_cooldown_bars;    // after any closed SL loser
+   double           slip_cooldown_points;     // abnormal slippage trigger
+   int              slip_cooldown_bars;       // pause length after it
+   int              max_trades_per_session;
+
+   // News (§14): native MT5 calendar when available, CSV fallback
+   ENUM_XARE_NEWS_SOURCE news_source;
+
+   // Breakout hardening (§2): ATR-normalized strength bands (hypotheses)
+   double           breakout_body_min_pct;   // body >= % of bar range
+   double           breakout_strong_atr;     // beyond >= this (ATR) => strong band
+
+   // Startup health (§21)
+   bool             health_check_enabled;    // BLOCKED blocks sends (not signals)
   };
 
 //--- defaults: safety-first (spec §63). Values are hypotheses (docs/parameters.md)
@@ -217,6 +260,7 @@ void XareConfigDefaults(SXareConfig &c)
    c.close_on_daily_limit    = false;  // §24 default: stop opening, keep managing
    c.risk_mult_caution       = 0.5;    // only downward, never up (§31)
    c.risk_mult_reduced       = 0.25;
+   c.risk_mult_defensive     = 0.5;    // §10 DEFENSIVE state scale
    c.working_tf              = PERIOD_M15;  // EA overrides with chart period
 
    // Execution: hard ceilings (docs/parameters.md)
@@ -254,6 +298,36 @@ void XareConfigDefaults(SXareConfig &c)
    c.journal_dir            = "XARE";
    c.expectancy_min_trades  = 30;     // §17: abstain (never block) below this
    c.expectancy_block_r     = 0.10;   // clearly-negative threshold
+
+   // --- v0.17.0 hardening defaults: every addition is OFF or risk-reducing
+   c.factor_min             = 0.5;    // per-factor hard floor (§6)
+
+   c.max_consec_losing_days = 2;      // §10: 2 losing days -> DEFENSIVE
+   c.min_margin_level_pct   = 200.0;  // §10: margin level floor (%); 0=off
+
+   c.profit_lock_enabled    = false;  // §9: OFF until walk-forward validates
+   c.lock_milestone_pct     = 10.0;   // +10% equity arms a floor
+   c.lock_floor_pct         = 50.0;   // protect 50% of the gain
+
+   c.stages_enabled         = true;   // §8: labels + reduce-only risk factor
+   c.stage_micro_max_equity = 500.0;
+   c.stage_growth_max_equity= 5000.0;
+   c.stage_standard_max_equity = 50000.0;
+
+   c.friday_cutoff_min      = 1200;   // §15: 20:00 server = final entry start
+   c.friday_close_all       = false;  // §15: optional close-all (OFF)
+
+   c.post_sl_cooldown_bars  = 4;      // §12: pause after any SL loser
+   c.slip_cooldown_points   = 150.0;  // §12: abnormal slippage trigger (pt)
+   c.slip_cooldown_bars     = 4;
+   c.max_trades_per_session = 2;
+
+   c.news_source            = XARE_NEWS_CALENDAR_IF_AVAILABLE; // §14
+
+   c.breakout_body_min_pct  = 50.0;   // §2: body must be >= 50% of range
+   c.breakout_strong_atr    = 0.5;    // §2: beyond >= 0.5 ATR => strong band
+
+   c.health_check_enabled   = true;   // §21: BLOCKED blocks sends (not signals)
   }
 
 #endif // __XARE_CONFIG_MQH__

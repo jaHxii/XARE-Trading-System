@@ -35,7 +35,9 @@ contains no trade paths.
 | `PositionManager.mqh` | Position state machine, one-position rule, management steps | Execution, Indicators | state transitions |
 | `ExitEngine.mqh` | BE / partial / trailing / time / regime / reversal exits | PositionManager, Indicators | exit decisions |
 | `SafetyEngine.mqh` | Centralized blocking of trades with reasons | everything | GO / BLOCK(reason) |
-| `NewsFilter.mqh` | Optional news blackout; fails safe without data | file/API feed if present | clearance |
+| `NewsFilter.mqh` | News blackout: MT5 Economic Calendar w/ CSV fallback; fails safe without data | calendar / CSV feed | clearance |
+| `StateStore.mqh` | §20 crash-recovery persistence (atomic JSON + .bak fallback) | RiskEngine, PositionManager | restorable state |
+| `HealthCheck.mqh` | §21 startup diagnostics → single READY/BLOCKED verdict | engine probes | health verdict |
 | `PerformanceTracker.mqh` | Win/loss stats, streaks, expectancy (closed trades) | journal | statistics |
 | `Diagnostics.mqh` | Chart dashboard (optional) | everything | panel |
 | `XARE.mq5` | OnInit/OnTick orchestration only | all modules | EA behavior |

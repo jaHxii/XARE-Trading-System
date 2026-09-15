@@ -17,6 +17,7 @@
 
 #include "Types.mqh"
 #include "Logger.mqh"
+#include "StateStore.mqh"   // §20: SXarePersistedState for adopt/persist
 
 //--- exit record for a closed trade (journal + research)
 struct SXareExitRecord
@@ -148,6 +149,109 @@ public:
 
    bool              HaveContext(void) const { return m_have_ctx; }
    ulong             Ticket(void) const      { return m_ticket; }
+
+   //--- §20 restart adoption: restore the management context of an
+   //--- ALREADY-OPEN position after an EA/terminal restart. Validates
+   //--- against the live position (ticket must still exist with matching
+   //--- direction) — a restored context can never create an order.
+   bool              AdoptPersisted(const ulong ticket, const int state,
+                                    const int direction,
+                                    const double volume_initial,
+                                    const double volume_current,
+                                    const double entry_price,
+                                    const double sl_price,
+                                    const double tp_price,
+                                    const double risk_pct_at_entry,
+                                    const double score_at_entry,
+                                    const ENUM_XARE_SETUP setup,
+                                    const string session, const string regime,
+                                    const string open_reason,
+                                    const datetime open_time,
+                                    const datetime open_bar_time,
+                                    const int bars_in_trade,
+                                    const bool be_done, const bool partial_done,
+                                    string &note_out)
+     {
+      note_out = "";
+      //--- find the live position by our magic+symbol, cross-check ticket
+      ulong live = FindTicket();
+      if(live == 0)
+        {
+         note_out = "no live position matches magic+symbol";
+         return false;
+        }
+      if(ticket != live)
+        {
+         note_out = StringFormat("persisted ticket %I64u != live ticket %I64u — adopting LIVE position with restored flags",
+                                 ticket, live);
+         // adopt the live ticket but keep restored management flags;
+         // volume/SL/TP refresh from the terminal below.
+        }
+      if(!PositionSelectByTicket(live))
+        {
+         note_out = "position select failed";
+         return false;
+        }
+      long live_type = PositionGetInteger(POSITION_TYPE);
+      if((direction > 0 && live_type != POSITION_TYPE_BUY) ||
+         (direction < 0 && live_type != POSITION_TYPE_SELL))
+        {
+         note_out = "persisted direction disagrees with the live position — refusing adoption";
+         return false;
+        }
+      m_ticket            = live;
+      m_have_ctx          = true;
+      m_ctx.state         = (ENUM_XARE_POS_STATE)state;
+      m_ctx.ticket        = live;
+      m_ctx.direction     = direction;
+      m_ctx.volume_initial= (volume_initial > 0.0)
+                            ? volume_initial : PositionGetDouble(POSITION_VOLUME);
+      m_ctx.volume_current= PositionGetDouble(POSITION_VOLUME);
+      m_ctx.entry_price   = (entry_price > 0.0) ? entry_price
+                            : PositionGetDouble(POSITION_PRICE_OPEN);
+      m_ctx.sl_price      = PositionGetDouble(POSITION_SL);
+      m_ctx.tp_price      = PositionGetDouble(POSITION_TP);
+      m_ctx.risk_pct_at_entry = risk_pct_at_entry;
+      m_ctx.score_at_entry    = score_at_entry;
+      m_ctx.setup         = setup;
+      m_ctx.session       = session;
+      m_ctx.regime        = regime;
+      m_ctx.open_reason   = open_reason;
+      m_ctx.open_time     = (open_time > 0) ? open_time : (datetime)PositionGetInteger(POSITION_TIME);
+      m_ctx.open_bar_time = (open_bar_time > 0) ? open_bar_time : m_ctx.open_time;
+      m_ctx.bars_in_trade = bars_in_trade;
+      m_ctx.be_done       = be_done;          // NEVER reset management flags:
+      m_ctx.partial_done  = partial_done;     // duplicate-management protection
+      note_out += StringFormat("ticket %I64u %s flags be=%d partial=%d bars=%d",
+                               live, m_ctx.direction > 0 ? "LONG" : "SHORT",
+                               be_done ? 1 : 0, partial_done ? 1 : 0, bars_in_trade);
+      return true;
+     }
+
+   //--- §20: current position context as a persisted-state fragment
+   void              Persisted(SXarePersistedState &ps) const
+     {
+      ps.pos_present      = (m_have_ctx && m_ticket > 0) ? 1 : 0;
+      ps.pos_ticket       = (long)m_ticket;
+      ps.pos_state        = (int)m_ctx.state;
+      ps.pos_direction    = m_ctx.direction;
+      ps.pos_volume_initial = m_ctx.volume_initial;
+      ps.pos_volume_current = m_ctx.volume_current;
+      ps.pos_entry_price  = m_ctx.entry_price;
+      ps.pos_sl_price     = m_ctx.sl_price;
+      ps.pos_tp_price     = m_ctx.tp_price;
+      ps.pos_risk_pct_at_entry = m_ctx.risk_pct_at_entry;
+      ps.pos_score_at_entry    = m_ctx.score_at_entry;
+      ps.pos_setup        = (int)m_ctx.setup;
+      ps.pos_session      = m_ctx.session;
+      ps.pos_regime       = m_ctx.regime;
+      ps.pos_open_reason  = m_ctx.open_reason;
+      ps.pos_open_time    = m_ctx.open_time;
+      ps.pos_open_bar_time= m_ctx.open_bar_time;
+      ps.pos_bars_in_trade= m_ctx.bars_in_trade;
+      ps.pos_be_done      = m_ctx.be_done ? 1 : 0;
+      ps.pos_partial_done = m_ctx.partial_done ? 1 : 0;
+     }
 
    //--- copy-out of the tracked context (for the pure ExitEngine)
    bool              GetContext(SXarePosition &out) const

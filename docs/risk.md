@@ -43,11 +43,36 @@ are read from the **broker's symbol properties at runtime**. Nothing is assumed.
 
 ## Risk states
 
-`NORMAL → CAUTION → REDUCED_RISK → HALTED`, driven by peak-to-current equity
-drawdown (defaults above). REDUCED_RISK halves risk and blocks the more
-aggressive setups. HALTED also **closes nothing by default** but blocks all new
-trades and requires manual EA re-init to clear (safety latch against
+`NORMAL → CAUTION → REDUCED_RISK → DEFENSIVE → HALTED`, driven by
+peak-to-current equity drawdown (defaults above). REDUCED_RISK halves risk and
+blocks the more aggressive setups. **DEFENSIVE** (v0.17, §10) additionally
+triggers on consecutive losing days (default 2) or a margin level below the
+floor (default 200%) and bans counter-trend mean-reversion setups via the
+regime-strategy matrix. HALTED also **closes nothing by default** but blocks all
+new trades and requires manual EA re-init to clear (safety latch against
 oscillation).
+
+### Adaptive risk factors (v0.17, §6)
+
+Final risk = base × state ladder × bounded factor product. Every factor is
+clamped to `[factor_min, 1.0]` (default floor 0.5): **risk can only shrink or
+stay — no factor can amplify it** (test-enforced invariant). Factors without
+data-backed justification are passed as N/A and skipped, not invented.
+
+### Survival layers (v0.17)
+
+- Profit-lock floor (§9): optional (default OFF, unvalidated); once armed the
+  floor ratchets up only; breach blocks new sends.
+- Capital stages (§8): research labels MICRO/GROWTH/STANDARD/SCALE (+ health
+  override DEFENSIVE); stage factor is reduce-only; transitions logged.
+- Weekend engine (§15): Friday final-entry cutoff; optional close-all (OFF).
+- Cooldown suite (§12): post-SL, abnormal-slippage, per-session cap — stacked
+  with the loss-streak cooldown.
+- Margin-level floor (§10): falling margin level blocks entries (MARGIN_LEVEL).
+- Startup health (§21): BLOCKED verdict blocks sends with reason HEALTH.
+- State persistence (§20): restart restores anchors/counters/cooldowns and
+  adopts the open position's management flags — no duplicate management, no
+  duplicate orders after a crash.
 
 ## Daily accounting
 

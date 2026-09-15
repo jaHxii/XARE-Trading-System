@@ -52,6 +52,66 @@ void XarePullbackZone(const double ema_fast, const double ema_mid,
    zone_hi = hi + w;
   }
 
+//--- §5/§23 regime-strategy matrix (formalized from the M7 gates; behavior
+//--- is IDENTICAL to the previous inline gates for NORMAL/CAUTION/REDUCED —
+//--- verified by the unchanged T9 fixtures — plus the DEFENSIVE additions).
+//--- The EA must never force a trade because a strategy is "active": the
+//--- matrix only decides ELIGIBILITY; detectors + scoring still must fire.
+bool XareSetupAllowedInRegime(const ENUM_XARE_SETUP setup,
+                              const ENUM_XARE_REGIME regime,
+                              const ENUM_XARE_RISK_STATE health_state)
+  {
+   //--- survival states: no non-tradeable regime ever trades
+   if(regime == XARE_REGIME_UNSAFE || regime == XARE_REGIME_UNKNOWN ||
+      regime == XARE_REGIME_HIGH_VOLATILITY ||
+      regime == XARE_REGIME_LOW_VOLATILITY)
+      return false;
+   //--- §10 DEFENSIVE: survival mode bans counter-trend mean-reversion;
+   //--- only with-trend setups remain eligible
+   if(health_state == XARE_RISK_DEFENSIVE ||
+      health_state == XARE_RISK_HALTED)
+      return (setup == XARE_SETUP_TREND_CONTINUATION ||
+              setup == XARE_SETUP_TREND_PULLBACK ||
+              setup == XARE_SETUP_BREAKOUT ||
+              setup == XARE_SETUP_BREAKOUT_RETEST);
+   //--- range reversal is a RANGE-only setup (as gated in M7)
+   if(setup == XARE_SETUP_RANGE_REVERSAL)
+      return (regime == XARE_REGIME_RANGE);
+   //--- sweep reversal / breakout / retest / pullback / continuation:
+   //--- eligible in every tradeable regime (alignment still gates direction)
+   return true;
+  }
+
+//--- §2 breakout strength band from the ATR-normalized distance:
+//--- 0 = weak (< 0.25 ATR beyond), 1 = normal, 2 = strong (>= strong_atr).
+//--- Coarse bands, not continuous tuning (overfitting control, review §E).
+int XareBreakoutStrength(const double beyond_atr, const double strong_atr)
+  {
+   if(beyond_atr <= 0.0)
+      return 0;
+   if(strong_atr > 0.0 && beyond_atr >= strong_atr)
+      return 2;
+   if(beyond_atr >= 0.25)
+      return 1;
+   return 0;
+  }
+
+//--- §2 breakout quality criteria (all additive confidence bumps, each a
+//--- documented hypothesis — see docs/parameters.md):
+//---   body:     candle body >= body_min_pct % of the bar range
+//---   momentum: DI spread agrees with the breakout direction
+//---   activity: tick volume >= 1.2× the recent average (when known)
+bool XareBreakoutBodyOK(const double open, const double high,
+                        const double low, const double close,
+                        const double body_min_pct)
+  {
+   double range = high - low;
+   if(range <= 0.0 || body_min_pct <= 0.0)
+      return false;
+   double body = MathAbs(close - open);
+   return (body / range * 100.0 >= body_min_pct);
+  }
+
 // BREAKOUT_RETEST pure core: a BOS happened 'bars_since' bars ago at 'level';
 // the current bar revisits the edge and rejects back on the breakout side.
 bool XareRetestTrigger(const int bos_direction, const double bos_level,
@@ -167,6 +227,8 @@ private:
 
    bool              DetBreakout(const int dir, const SXareBar &bar,
                                  const SXareStructure &st, const double atr,
+                                 const SXareFeatures &f,
+                                 const double avg_tick_volume,
                                  SXareDecision &c) const
      {
       bool bull = (dir > 0);
@@ -177,16 +239,32 @@ private:
       double beyond = (bull ? (bar.close - level) : (level - bar.close));
       if(beyond < 0.10 * atr)
          return false;
+      //--- §2 hardening: strength band + quality bumps (all hypotheses)
+      int    strength = XareBreakoutStrength(beyond / atr, m_cfg.breakout_strong_atr);
+      bool   body_ok  = XareBreakoutBodyOK(bar.open, bar.high, bar.low,
+                                           bar.close, m_cfg.breakout_body_min_pct);
+      bool   mom_ok   = (bull ? (f.di_plus > f.di_minus)
+                              : (f.di_minus > f.di_plus));
+      bool   tick_ok  = (avg_tick_volume > 0.0 &&
+                         (double)bar.tick_volume >= 1.2 * avg_tick_volume);
+      double bump = (strength == 2) ? 15.0 : (strength == 1 ? 10.0 : 0.0);
+      if(body_ok) bump += 5.0;
+      if(mom_ok)  bump += 5.0;
+      if(tick_ok) bump += 5.0;
       c.direction        = dir;
       c.setup            = XARE_SETUP_BREAKOUT;
-      c.setup_confidence = 60.0 + (beyond >= 0.25*atr ? 10.0 : 0.0);
+      c.setup_confidence = 60.0 + bump;
       c.entry_lo         = level;
       c.entry_hi         = bar.close;
       c.invalidation     = StringFormat("close back inside %s voids breakout",
                             DoubleToString(level, 2));
-      c.evidence         = StringFormat("BOS %s level %s by %.2f (%.2f ATR)",
+      c.evidence         = StringFormat("BOS %s level %s by %.2f (%.2f ATR, %s band)%s%s%s",
                             bull ? "above" : "below", DoubleToString(level,2),
-                            beyond, beyond/atr);
+                            beyond, beyond/atr,
+                            strength == 2 ? "STRONG" : strength == 1 ? "NORMAL" : "WEAK",
+                            body_ok  ? ", body-ok"  : "",
+                            mom_ok   ? ", DI-mom"   : "",
+                            tick_ok  ? ", tick-act" : "");
       return true;
      }
 
@@ -254,10 +332,14 @@ public:
      }
 
    //--- PURE evaluation. prev_roc = ROC at shift 2 (caller-computed).
+   //--- health_state feeds the §5/§23 matrix (DEFENSIVE bans counter-trend
+   //--- setups); avg_tick_volume = SMA of tick volume for §2 activity check.
    bool              Evaluate(const SXareRegime &regime, const SXareMTF &mtf,
                               const SXareStructure &st, const SXareSession &session,
                               const SXareLiquidity &liq, const SXareBar &bar,
                               const SXareFeatures &f, const double prev_roc,
+                              const ENUM_XARE_RISK_STATE health_state,
+                              const double avg_tick_volume,
                               SXareDecision &out)
      {
       XareResetDecision(out);
@@ -272,15 +354,16 @@ public:
          return true;
         }
 
-      // --- gate 2: regime compatibility --------------------------------
-      if(regime.regime == XARE_REGIME_UNSAFE ||
-         regime.regime == XARE_REGIME_UNKNOWN ||
-         regime.regime == XARE_REGIME_HIGH_VOLATILITY ||
-         regime.regime == XARE_REGIME_LOW_VOLATILITY)
+      // --- gate 2: regime compatibility (§5/§23 matrix, formalized) -----
+      if(!XareSetupAllowedInRegime(XARE_SETUP_TREND_CONTINUATION, regime.regime,
+                                   health_state) ||
+         !XareSetupAllowedInRegime(XARE_SETUP_LIQUIDITY_SWEEP_REVERSAL,
+                                   regime.regime, health_state))
         {
          out.nt_reason = XARE_NT_REGIME_INCOMPATIBLE;
-         out.evidence  = StringFormat("regime %s offers no setup precondition",
-                         XareRegimeToString(regime.regime));
+         out.evidence  = StringFormat("regime %s (health %s) offers no eligible setup",
+                         XareRegimeToString(regime.regime),
+                         XareRiskStateToString(health_state));
          m_last = out;
          return true;
         }
@@ -383,7 +466,7 @@ public:
         {
          int dir = dir_ok_bull ? +1 : -1;
          SXareDecision t; XareResetDecision(t);
-         if(DetBreakout(dir, bar, st, atr, t))
+         if(DetBreakout(dir, bar, st, atr, f, avg_tick_volume, t))
            {
             attempted = true;
             if(Enabled(t.setup)) { cand = t; }
@@ -467,6 +550,18 @@ public:
         }
       m_last = out;
       return true;
+     }
+
+   //--- backward-compatible overload: NORMAL health, no tick-activity data
+   //--- (used by SELF_TEST fixtures; behavior-identical to pre-hardening).
+   bool              Evaluate(const SXareRegime &regime, const SXareMTF &mtf,
+                              const SXareStructure &st, const SXareSession &session,
+                              const SXareLiquidity &liq, const SXareBar &bar,
+                              const SXareFeatures &f, const double prev_roc,
+                              SXareDecision &out)
+     {
+      return Evaluate(regime, mtf, st, session, liq, bar, f, prev_roc,
+                      XARE_RISK_NORMAL, 0.0, out);
      }
 
    bool              Last(SXareDecision &out) const
