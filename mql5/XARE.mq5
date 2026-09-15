@@ -25,6 +25,7 @@
 #include <XARE\MarketData.mqh>
 #include <XARE\Indicators.mqh>
 #include <XARE\MultiTimeframe.mqh>
+#include <XARE\RegimeEngine.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -59,6 +60,7 @@ CXareDiagnostics  g_ui;
 CXareMarketData   g_md;
 CXareIndicators   g_ind;
 CXareMultiTimeframe g_mtf;
+CXareRegimeEngine  g_regime;
 
 //--- runtime state
 string            g_symbol;
@@ -232,6 +234,13 @@ int OnInit()
       g_ind.Release();
       return INIT_FAILED;
      }
+   if(!g_regime.Init(g_symbol, _Period, g_cfg, /*atr_handle=*/g_ind.ATRHandle(), &g_log))
+     {
+      g_log.Error("INIT", "regime engine failed to initialize");
+      g_mtf.Release();
+      g_ind.Release();
+      return INIT_FAILED;
+     }
    SXareSymbolProps props;
    g_md.GetProps(props);
    g_log.Info("INIT", StringFormat("engines ready | props.valid=%s min_history=%d mtf=H4+H1+%s",
@@ -280,6 +289,23 @@ void RunSelfTest()
    if(MathAbs(XareRateOfChange(90.0, 100.0) - (-10.0)) > 1e-9){ failed++; Print("SELFTEST FAIL T3 roc down"); }
    if(XareRateOfChange(100.0, 0.0) != 0.0)                    { failed++; Print("SELFTEST FAIL T3 roc zero-div"); }
 
+   // T6 (M4): regime classifier priority — volatility overrides, then breakout,
+   // then trend, then range; ADX-strong without stack agreement ⇒ UNKNOWN
+   if(XareClassifyRegime(false,false,false,false,true,false)
+      != XARE_REGIME_HIGH_VOLATILITY) { failed++; Print("SELFTEST FAIL T6 vol-high priority"); }
+   if(XareClassifyRegime(false,false,false,false,false,true)
+      != XARE_REGIME_LOW_VOLATILITY)  { failed++; Print("SELFTEST FAIL T6 vol-low priority"); }
+   if(XareClassifyRegime(true,true,false,true,false,false)
+      != XARE_REGIME_BREAKOUT)        { failed++; Print("SELFTEST FAIL T6 breakout priority"); }
+   if(XareClassifyRegime(false,true,false,true,false,false)
+      != XARE_REGIME_TREND_UP)        { failed++; Print("SELFTEST FAIL T6 trend up"); }
+   if(XareClassifyRegime(false,false,true,true,false,false)
+      != XARE_REGIME_TREND_DOWN)      { failed++; Print("SELFTEST FAIL T6 trend down"); }
+   if(XareClassifyRegime(false,false,true,false,false,false)
+      != XARE_REGIME_RANGE)           { failed++; Print("SELFTEST FAIL T6 range"); }
+   if(XareClassifyRegime(false,false,false,true,false,false)
+      != XARE_REGIME_UNKNOWN)         { failed++; Print("SELFTEST FAIL T6 unknown"); }
+
    // T5 (M3): MTF alignment classifier — mixed info must never force a side
    if(CXareMultiTimeframe::ClassifyStatic(XARE_TF_BULL,XARE_TF_BULL,XARE_TF_BULL)
       != XARE_ALIGN_BULLISH) { failed++; Print("SELFTEST FAIL T5 bull align"); }
@@ -295,7 +321,7 @@ void RunSelfTest()
    double n1 = NormalizeDouble(MathRound(123.478/0.05)*0.05, 2);  // expect 123.50
    if(MathAbs(n1 - 123.50) > 1e-9)                            { failed++; Print("SELFTEST FAIL T4 tick-grid"); }
 
-   if(failed==0) Print("XARE SELF-TEST: PASS (4 groups)");
+   if(failed==0) Print("XARE SELF-TEST: PASS (6 groups)");
    else          Print("XARE SELF-TEST: FAIL (", failed, " checks)");
   }
 
@@ -367,6 +393,12 @@ void ProcessBar()
                   mtf.alignment==XARE_ALIGN_BEARISH ? "BEARISH" :
                   mtf.alignment==XARE_ALIGN_MIXED   ? "MIXED"   : "NEUTRAL",
                   mtf.evidence));
+
+   // --- M4: regime classification
+   SXareRegime regime;
+   if(g_regime.Evaluate(1, f, bar, regime) && regime.valid)
+      g_log.Info("REGIME", StringFormat("%s conf=%d | %s",
+                  XareRegimeToString(regime.regime), regime.confidence, regime.evidence));
   }
 
 //+------------------------------------------------------------------+

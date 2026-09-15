@@ -145,6 +145,10 @@ public:
       out = m_cache;
       return true;
      }
+
+   //--- handle accessor for engines that need raw ATR history (borrowed,
+   //--- NOT released by the borrower; ownership stays with this class)
+   int               ATRHandle(void) const { return m_h_atr; }
   };
 
 #endif // __XARE_INDICATORS_MQH__

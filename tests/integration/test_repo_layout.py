@@ -27,6 +27,7 @@ REQUIRED_FILES = [
     "mql5/Include/XARE/MarketData.mqh",
     "mql5/Include/XARE/Indicators.mqh",
     "mql5/Include/XARE/MultiTimeframe.mqh",
+    "mql5/Include/XARE/RegimeEngine.mqh",
 ]
 
 
@@ -82,3 +83,15 @@ def test_mtf_mixed_alignment_is_distinct():
     mtf = (REPO / "mql5/Include/XARE/MultiTimeframe.mqh").read_text(encoding="utf-8")
     assert "XARE_ALIGN_MIXED" in mtf
     assert "ClassifyStatic" in mtf  # self-testable pure classifier
+
+
+def test_regime_uses_all_spec9_regimes():
+    """M4: all spec-9 regimes must exist and confidence is score, not probability."""
+    types_src = (REPO / "mql5/Include/XARE/Types.mqh").read_text(encoding="utf-8")
+    for token in ("XARE_REGIME_TREND_UP", "XARE_REGIME_TREND_DOWN",
+                  "XARE_REGIME_RANGE", "XARE_REGIME_BREAKOUT",
+                  "XARE_REGIME_HIGH_VOLATILITY", "XARE_REGIME_LOW_VOLATILITY",
+                  "XARE_REGIME_UNSAFE", "XARE_REGIME_UNKNOWN"):
+        assert token in types_src
+    eng = (REPO / "mql5/Include/XARE/RegimeEngine.mqh").read_text(encoding="utf-8")
+    assert "not a probability" in eng or "NOT a probability" in eng

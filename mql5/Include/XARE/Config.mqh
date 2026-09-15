@@ -35,6 +35,13 @@ struct SXareConfig
    int              atr_period;          // 14
    int              history_bars_min;    // required closed bars before engine runs
 
+   // Regime (§9). Thresholds are hypotheses; see docs/parameters.md.
+   int              trend_adx_min;       // ADX above ⇒ trend-capable
+   int              high_vol_atr_pct;    // ATR percentile above ⇒ HIGH_VOLATILITY
+   int              low_vol_atr_pct;     // ATR percentile below ⇒ LOW_VOLATILITY
+   int              breakout_range_lookback; // bars defining pre-breakout range
+   int              regime_conf_min;     // below ⇒ UNKNOWN (no-trend evidence)
+
    // Logging / Research (§34, §37)
    int              log_level;            // 0=DEBUG 1=INFO 2=WARN 3=ERROR
    bool             research_csv_enabled; // RESEARCH mode feature rows
@@ -65,6 +72,13 @@ void XareConfigDefaults(SXareConfig &c)
    c.adx_period             = 14;
    c.atr_period             = 14;
    c.history_bars_min       = 260;    // EMA200 + margin
+
+   // Regime thresholds: initial hypotheses (docs/parameters.md)
+   c.trend_adx_min          = 22;
+   c.high_vol_atr_pct       = 80;
+   c.low_vol_atr_pct        = 20;
+   c.breakout_range_lookback= 20;
+   c.regime_conf_min        = 55;
 
    c.log_level              = 1;      // INFO
    c.research_csv_enabled   = false;  // enabled by RESEARCH mode itself

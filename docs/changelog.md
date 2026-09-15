@@ -4,6 +4,26 @@ All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).
 
+## [v0.4.0] — 2026-09-15 (M4)
+
+### Added
+- `RegimeEngine.mqh`: 8-regime classification with documented priority
+  (volatility overrides → breakout → trend → range → unknown), ATR
+  percentile via rank over a 200-bar window, breakout test against the
+  prior 20-bar range with a 0.10·ATR buffer, and counted-evidence
+  confidence (0–100 score, explicitly not a probability).
+- Pure classifier `XareClassifyRegime` + SELF_TEST group T6 covering every
+  regime branch.
+- Config: `trend_adx_min`, `high/low_vol_atr_pct`, `breakout_range_lookback`,
+  `regime_conf_min`; EA inputs exposed.
+
+### Fixed
+- `SXareRegime` lacked the `valid` flag its sibling structs had (compiler
+  caught every use) — added for consistency.
+
+### Verified
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_m4.log`).
+
 ## [v0.3.0] — 2026-09-15 (M3)
 
 ### Added

@@ -185,6 +185,7 @@ struct SXareScore
 //--- regime verdict: label + confidence + evidence (never a probability)
 struct SXareRegime
   {
+   bool             valid;          // evaluation succeeded
    ENUM_XARE_REGIME regime;
    int              confidence;     // 0..100 score, not probability
    string           evidence;
