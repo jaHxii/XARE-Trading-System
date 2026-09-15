@@ -42,6 +42,12 @@ struct SXareConfig
    int              breakout_range_lookback; // bars defining pre-breakout range
    int              regime_conf_min;     // below ⇒ UNKNOWN (no-trend evidence)
 
+   // Structure (§10). A pivot is KNOWN only after pivot_confirm closed bars
+   // past it — see StructureEngine.mqh header for the exact rule.
+   int              pivot_lookback;      // bars each side of a pivot
+   int              pivot_confirm;       // closed bars after pivot before it counts
+   int              structure_max_zones; // S/R levels kept per side
+
    // Logging / Research (§34, §37)
    int              log_level;            // 0=DEBUG 1=INFO 2=WARN 3=ERROR
    bool             research_csv_enabled; // RESEARCH mode feature rows
@@ -79,6 +85,11 @@ void XareConfigDefaults(SXareConfig &c)
    c.low_vol_atr_pct        = 20;
    c.breakout_range_lookback= 20;
    c.regime_conf_min        = 55;
+
+   // Structure: initial hypotheses (docs/parameters.md)
+   c.pivot_lookback         = 3;
+   c.pivot_confirm          = 2;
+   c.structure_max_zones    = 4;
 
    c.log_level              = 1;      // INFO
    c.research_csv_enabled   = false;  // enabled by RESEARCH mode itself

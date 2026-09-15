@@ -4,6 +4,21 @@ All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).
 
+## [v0.5.0] — 2026-09-15 (M5)
+
+### Added
+- `StructureEngine.mqh`: confirmed-fractal swing detection (pivot known only
+  after `pivot_confirm` closed bars past it — exact rule documented in the
+  module header), two most recent swing highs/lows, HH/HL/LH/LL trend labels
+  (BULLISH/BEARISH/MIXED/NEUTRAL), BOS via close beyond last swing with CHoCH
+  when BOS runs against the prevailing swing trend, and approximate S/R zones
+  (capped per side).
+- SELF_TEST group T7 (pivot confirmation math).
+- Config: `pivot_lookback`, `pivot_confirm`, `structure_max_zones` + EA inputs.
+
+### Verified
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_m5.log`).
+
 ## [v0.4.0] — 2026-09-15 (M4)
 
 ### Added

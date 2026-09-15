@@ -26,6 +26,7 @@
 #include <XARE\Indicators.mqh>
 #include <XARE\MultiTimeframe.mqh>
 #include <XARE\RegimeEngine.mqh>
+#include <XARE\StructureEngine.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -61,6 +62,7 @@ CXareMarketData   g_md;
 CXareIndicators   g_ind;
 CXareMultiTimeframe g_mtf;
 CXareRegimeEngine  g_regime;
+CXareStructureEngine g_struct;
 
 //--- runtime state
 string            g_symbol;
@@ -241,6 +243,14 @@ int OnInit()
       g_ind.Release();
       return INIT_FAILED;
      }
+   if(!g_struct.Init(g_symbol, _Period, g_cfg.pivot_lookback,
+                     g_cfg.pivot_confirm, g_cfg.structure_max_zones, &g_log))
+     {
+      g_log.Error("INIT", "structure engine failed to initialize");
+      g_mtf.Release();
+      g_ind.Release();
+      return INIT_FAILED;
+     }
    SXareSymbolProps props;
    g_md.GetProps(props);
    g_log.Info("INIT", StringFormat("engines ready | props.valid=%s min_history=%d mtf=H4+H1+%s",
@@ -289,6 +299,10 @@ void RunSelfTest()
    if(MathAbs(XareRateOfChange(90.0, 100.0) - (-10.0)) > 1e-9){ failed++; Print("SELFTEST FAIL T3 roc down"); }
    if(XareRateOfChange(100.0, 0.0) != 0.0)                    { failed++; Print("SELFTEST FAIL T3 roc zero-div"); }
 
+   // T7 (M5): pivot confirmation math — a pivot needs lookback + confirm bars
+   if(CXareStructureEngine::MinBarsForPivot(3, 2) != 5)
+      { failed++; Print("SELFTEST FAIL T7 pivot math"); }
+
    // T6 (M4): regime classifier priority — volatility overrides, then breakout,
    // then trend, then range; ADX-strong without stack agreement ⇒ UNKNOWN
    if(XareClassifyRegime(false,false,false,false,true,false)
@@ -321,7 +335,7 @@ void RunSelfTest()
    double n1 = NormalizeDouble(MathRound(123.478/0.05)*0.05, 2);  // expect 123.50
    if(MathAbs(n1 - 123.50) > 1e-9)                            { failed++; Print("SELFTEST FAIL T4 tick-grid"); }
 
-   if(failed==0) Print("XARE SELF-TEST: PASS (6 groups)");
+   if(failed==0) Print("XARE SELF-TEST: PASS (7 groups)");
    else          Print("XARE SELF-TEST: FAIL (", failed, " checks)");
   }
 
@@ -399,6 +413,11 @@ void ProcessBar()
    if(g_regime.Evaluate(1, f, bar, regime) && regime.valid)
       g_log.Info("REGIME", StringFormat("%s conf=%d | %s",
                   XareRegimeToString(regime.regime), regime.confidence, regime.evidence));
+
+   // --- M5: market structure
+   SXareStructure structure;
+   if(g_struct.Evaluate(1, structure) && structure.valid)
+      g_log.Info("STRUCT", structure.evidence);
   }
 
 //+------------------------------------------------------------------+

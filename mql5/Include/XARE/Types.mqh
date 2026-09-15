@@ -104,6 +104,35 @@ struct SXareMTF
    datetime         evaluated_at;
   };
 
+//--- market-structure trend from swing sequence (spec §10)
+enum ENUM_XARE_STRUCT_TREND
+  {
+   XARE_STRUCT_NEUTRAL = 0,
+   XARE_STRUCT_BULLISH,      // higher highs + higher lows
+   XARE_STRUCT_BEARISH,      // lower highs + lower lows
+   XARE_STRUCT_MIXED         // conflicting swings — no clean structure
+  };
+
+//--- structure verdict (spec §10)
+struct SXareStructure
+  {
+   bool             valid;
+   ENUM_XARE_STRUCT_TREND trend;
+   double           last_swing_high;
+   double           prev_swing_high;
+   double           last_swing_low;
+   double           prev_swing_low;
+   bool             bos_bull;       // close above last swing high (this bar)
+   bool             bos_bear;       // close below last swing low (this bar)
+   bool             choch;          // BOS against prevailing trend
+   double           resistance[4];  // top-zone refs (per side, capped)
+   double           support[4];
+   int              zone_count_res;
+   int              zone_count_sup;
+   string           evidence;
+   datetime         evaluated_at;
+  };
+
 //--- setup types (spec §15)
 enum ENUM_XARE_SETUP
   {

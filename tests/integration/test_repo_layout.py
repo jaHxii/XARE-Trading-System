@@ -28,6 +28,7 @@ REQUIRED_FILES = [
     "mql5/Include/XARE/Indicators.mqh",
     "mql5/Include/XARE/MultiTimeframe.mqh",
     "mql5/Include/XARE/RegimeEngine.mqh",
+    "mql5/Include/XARE/StructureEngine.mqh",
 ]
 
 
@@ -83,6 +84,13 @@ def test_mtf_mixed_alignment_is_distinct():
     mtf = (REPO / "mql5/Include/XARE/MultiTimeframe.mqh").read_text(encoding="utf-8")
     assert "XARE_ALIGN_MIXED" in mtf
     assert "ClassifyStatic" in mtf  # self-testable pure classifier
+
+
+def test_structure_pivot_confirmation_documented():
+    """M5: anti-look-ahead pivot rule must be explicit and use closed bars."""
+    se = (REPO / "mql5/Include/XARE/StructureEngine.mqh").read_text(encoding="utf-8")
+    assert "Pivot confirmation rule" in se
+    assert "MinBarsForPivot" in se
 
 
 def test_regime_uses_all_spec9_regimes():
