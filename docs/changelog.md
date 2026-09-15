@@ -1,5 +1,31 @@
 # Changelog
 
+## [v0.15.0] — 2026-09-15 (M19 dashboard)
+
+### Added
+- Full chart dashboard (`Diagnostics.mqh` rewritten): two-column compact
+  panel with XARE version, connection state, symbol/timeframe, **current
+  candle time**, price + spread, regime with color-coded confidence,
+  signal + score with the **full 8-component score breakdown**, risk state,
+  daily P/L, **daily drawdown** and current (peak) drawdown, open position
+  line (direction, lots, entry, SL, TP from the live terminal), session,
+  **news state** (CLEAR / BLACKOUT / NO DATA — fail-safe), trading
+  permission, and a **NO TRADE explanation line** translating every
+  machine reason into plain English (data warming up, regime incompatible,
+  confidence below floor, timeframes disagree, no trigger, setup
+  disabled).
+- Traffic-light color states throughout: green = healthy/permitted,
+  gold = caution, red = blocked/losing, silver = neutral (§68).
+- Panel labels are create-once/update-per-tick, pruned when the panel
+  shrinks, and deleted on deinit — no chart clutter, no object leaks.
+
+### Verified
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_m19.log`).
+- Python suite: 134 passed (unchanged; visual output needs a human with
+  MT5 open — not executable in this environment).
+
+## [v0.14.0] — 2026-09-15 (M13–M18)
+
 All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).

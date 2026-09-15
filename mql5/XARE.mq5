@@ -160,6 +160,8 @@ bool              g_have_regime   = false;
 SXareTradeDecision g_last_plan;     // fully priced plan (M10; not sent here)
 bool              g_have_plan     = false;
 bool              g_emergency_ref = false;   // mirror of the safety latch
+string            g_sess_cache    = "N/A";   // last evaluated session label
+string            g_news_ui_why   = "";      // news reason scratch (panel)
 
 //--- runtime state
 string            g_symbol;
@@ -1121,7 +1123,10 @@ void ProcessBar()
    session.high=0; session.low=0; session.range=0; session.episode_bars=0;
    session.evidence=""; session.evaluated_at=0;
    if(g_sess.Evaluate(1, session) && session.valid)
+     {
       g_log.Info("SESSION", session.evidence);
+      g_sess_cache = XareSessionToString(session.session);   // panel cache
+     }
 
    SXareLiquidity liq;
    liq.valid=false; liq.sweep_up=false; liq.sweep_down=false; liq.swept_level=0;
@@ -1294,6 +1299,12 @@ void OnTick()
    // --- dashboard snapshot (live values; analytics still placeholders) -
    double price       = SymbolInfoDouble(g_symbol, SYMBOL_BID);
    int    spread_pts  = g_md.CurrentSpreadPoints();
+   int    props_dg    = 5;   // symbol digits for panel formatting
+   {
+      SXareSymbolProps ptmp;
+      g_md.GetProps(ptmp);
+      props_dg = ptmp.digits;
+   }
    SXareFeatures feat;
    g_ind.Last(feat);   // refresh cache; liveness already shown via regime/score
    string decision_txt = "NO_DECISION";
@@ -1302,31 +1313,127 @@ void OnTick()
          ? StringFormat("%s %s", g_last_decision.direction > 0 ? "BUY" : "SELL",
                         XareSetupToString(g_last_decision.setup))
          : StringFormat("NO_TRADE(%s)", XareNoTradeToString(g_last_decision.nt_reason));
-   int    open_xare   = g_init_ok ? g_pos.CountOpen() : 0;   // M11 live count
-   double daily_pl    = 0.0;
-   double dd_pct      = 0.0;
+   // --- dashboard: assemble the full snapshot (M19) --------------------
+   int    open_xare   = g_init_ok ? g_pos.CountOpen() : 0;
+   double daily_pl    = 0.0, dd_pct = 0.0, daily_dd_pct = 0.0;
    string risk_s      = "N/A";
    if(g_risk.Ready())
      {
       SXareRiskSnapshot rs = g_risk.Snapshot();
-      daily_pl = rs.daily_pl;
-      dd_pct   = rs.current_dd_pct;
-      risk_s   = XareRiskStateToString(rs.state);
+      daily_pl     = rs.daily_pl;
+      dd_pct       = rs.current_dd_pct;
+      daily_dd_pct = rs.daily_dd_pct;
+      risk_s       = XareRiskStateToString(rs.state);
      }
    double ui_score    = 0.0;
    string ui_regime   = "UNKNOWN";
    int    ui_conf     = 0;
-   if(g_have_score)
-      ui_score = g_last_score.total;
    if(g_have_regime)
      {
       ui_regime = XareRegimeToString(g_last_regime.regime);
       ui_conf   = g_last_regime.confidence;
      }
+   string ui_components = "-";
+   if(g_have_score)
+      ui_components = StringFormat(
+         "trend %.0f/%.0f  mtf %.0f/%.0f  struct %.0f/%.0f  mom %.0f/%.0f  liq %.0f/%.0f  vol %.0f/%.0f  sess %.0f/%.0f  setup %.0f/%.0f",
+         g_last_score.trend.earned, g_last_score.trend.max,
+         g_last_score.mtf.earned, g_last_score.mtf.max,
+         g_last_score.structure.earned, g_last_score.structure.max,
+         g_last_score.momentum.earned, g_last_score.momentum.max,
+         g_last_score.liquidity.earned, g_last_score.liquidity.max,
+         g_last_score.volatility.earned, g_last_score.volatility.max,
+         g_last_score.session.earned, g_last_score.session.max,
+         g_last_score.setup.earned, g_last_score.setup.max);
 
-   g_ui.Update(g_symbol, g_tf_label, g_cfg.mode, price, spread_pts,
-               ui_regime, ui_conf, decision_txt, ui_score,
-               risk_s, daily_pl, dd_pct, open_xare, "N/A",
-               /*trading_allowed=*/false);
+   //--- position detail line (lot / entry / SL / TP from the live terminal)
+   string pos_detail = "";
+   if(open_xare > 0)
+     {
+      for(int i = PositionsTotal() - 1; i >= 0 && StringLen(pos_detail) == 0; i--)
+        {
+         ulong tk = PositionGetTicket(i);
+         if(tk == 0 || !PositionSelectByTicket(tk))
+            continue;
+         if(PositionGetString(POSITION_SYMBOL) != g_symbol ||
+            PositionGetInteger(POSITION_MAGIC) != g_cfg.magic)
+            continue;
+         long   ptype = PositionGetInteger(POSITION_TYPE);
+         double pvol  = PositionGetDouble(POSITION_VOLUME);
+         double popen = PositionGetDouble(POSITION_PRICE_OPEN);
+         double psl   = PositionGetDouble(POSITION_SL);
+         double ptp   = PositionGetDouble(POSITION_TP);
+         pos_detail = StringFormat("%s %.2f @ %s SL %s TP %s",
+                      (ptype == POSITION_TYPE_BUY) ? "BUY" : "SELL", pvol,
+                      DoubleToString(popen, props_dg), DoubleToString(psl, props_dg),
+                      DoubleToString(ptp, props_dg));
+         break;
+        }
+     }
+
+   //--- session + news for the panel
+   string sess_s = g_sess_cache;
+   string news_s = g_news.Enabled()
+                   ? (g_news.Clear(TimeCurrent(), g_news_ui_why) ? "CLEAR" : "BLACKOUT")
+                   : "NO DATA";
+
+   //--- NO-TRADE explanation: machine reason + human hint, always shown when flat-and-waiting
+   string notrade = "";
+   if(g_have_decision && !g_last_decision.has_signal && open_xare == 0)
+     {
+      notrade = XareNoTradeToString(g_last_decision.nt_reason);
+      switch(g_last_decision.nt_reason)
+        {
+         case XARE_NT_INSUFFICIENT_DATA:
+            notrade += " — history warming up or data gap; idling";
+            break;
+         case XARE_NT_REGIME_INCOMPATIBLE:
+            notrade += " — no setup precondition in this regime";
+            break;
+         case XARE_NT_REGIME_CONFIDENCE:
+            notrade += " — regime confidence below floor";
+            break;
+                    case XARE_NT_ALIGNMENT_CONFLICT:
+            notrade += " — higher timeframes disagree; not forcing a side";
+            break;
+         case XARE_NT_NO_SETUP_TRIGGER:
+            notrade += " — context valid, no setup fired on the last closed bar";
+            break;
+         case XARE_NT_SETUP_DISABLED:
+            notrade += " — setup matched but disabled in inputs";
+            break;
+         default:
+            break;
+        }
+     }
+
+   CXareDiagnostics::PanelData pd;
+   pd.version         = "v0.15.0";
+   pd.connected       = (TerminalInfoInteger(TERMINAL_CONNECTED) != 0);
+   pd.symbol          = g_symbol;
+   pd.timeframe       = g_tf_label;
+   pd.candle_time     = (datetime)SeriesInfoInteger(g_symbol, _Period, SERIES_LASTBAR_DATE);
+   pd.price           = price;
+   pd.digits          = props_dg;
+   pd.spread_points   = spread_pts;
+   pd.regime          = ui_regime;
+   pd.regime_conf     = ui_conf;
+   pd.signal          = decision_txt;
+   pd.score           = ui_score;
+   pd.components      = ui_components;
+   pd.risk_state      = risk_s;
+   pd.daily_pl        = daily_pl;
+   pd.daily_dd_pct    = daily_dd_pct;
+   pd.cur_dd_pct      = dd_pct;
+   pd.open_positions  = open_xare;
+   pd.pos_detail      = pos_detail;
+   pd.session         = sess_s;
+   pd.news            = news_s;
+   pd.trading_allowed = ModeAllowsTrading();
+   pd.notrade_reason  = notrade;
+   pd.action          = (open_xare > 0) ? "MANAGE POSITION"
+                        : (StringLen(notrade) > 0 ? "WAIT — see NO TRADE line"
+                                                  : "WAIT FOR SETUP");
+   g_ui.Update(pd);
   }
 //+------------------------------------------------------------------+
