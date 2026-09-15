@@ -1,6 +1,6 @@
 # XARE — Architecture
 
-Version: v0.1.0 · Last updated: 2026-09-15
+Version: v0.6.0 · Last updated: 2026-09-15
 
 ## Design principles
 
@@ -12,6 +12,10 @@ Version: v0.1.0 · Last updated: 2026-09-15
 
 ## Module map (`mql5/Include/XARE/`)
 
+M2–M6 context engines are live and log their verdicts per closed M15 bar;
+signal/scoring/risk/execution remain unbuilt (by design) and the EA still
+contains no trade paths.
+
 | Module | Responsibility | Consumes | Produces |
 |---|---|---|---|
 | `Types.mqh` | All enums/structs shared across layers | — | vocabulary |
@@ -20,7 +24,10 @@ Version: v0.1.0 · Last updated: 2026-09-15
 | `MarketData.mqh` | Bar/tick access, new-bar detection, spread, symbol props | terminal | OHLCV, spread, props |
 | `Indicators.mqh` | EMA20/50/200, RSI, ROC, ADX, ATR handles + cached reads | MarketData | feature values |
 | `RegimeEngine.mqh` | Regime classification + confidence + evidence (incl. volatility classes) | Indicators, MarketData | regime verdict |
+| `MultiTimeframe.mqh` | H4/H1/execution-TF labels and BULL/BEAR/MIXED/NEUTRAL alignment | Indicators (rule), MarketData | MTF verdict |
 | `StructureEngine.mqh` | Swings, HH/HL/LH/LL, BOS/CHoCH, S/R zones | MarketData | structure verdict |
+| `SessionEngine.mqh` | Asian/London/NY/overlap windows in broker time + episode H/L | MarketData, Config | session verdict |
+| `LiquidityEngine.mqh` | PDH/PDL, session H/L, swing extremes; objective sweep/false-break events | MarketData, SessionEngine | liquidity events |
 | `LiquidityEngine.mqh` | PDH/PDL, session H/L, sweep/false-break detection | MarketData, SessionEngine | liquidity state |
 | `SessionEngine.mqh` | Asian/London/NY/overlap windows in broker time | MarketData | session verdict |
 | `SignalEngine.mqh` | 6 setup detectors; returns setup or NO_TRADE | Regime, Structure, Liquidity, Session | candidate setups |
@@ -35,26 +42,24 @@ Version: v0.1.0 · Last updated: 2026-09-15
 | `Diagnostics.mqh` | Chart dashboard (optional) | everything | panel |
 | `XARE.mq5` | OnInit/OnTick orchestration only | all modules | EA behavior |
 
-## Data flow (one M15 bar close)
+## Data flow (one M15 bar close — implemented portion)
 
 ```
-OnTick ──► MarketData.OnTick (new bar?)
-             └─► Indicators.Refresh(closed bars only)
-                   └─► RegimeEngine.Evaluate
-                         └─► StructureEngine.Update
-                               └─► SessionEngine.Update ─► LiquidityEngine.Update
-                                     └─► SignalEngine.Evaluate (if flat)
-                                           └─► ScoreEngine.Score
-                                                 └─► SafetyEngine.CanTrade
-                                                       └─► RiskEngine.Evaluate (risk state, caps, size)
-                                                             └─► ExecutionEngine.TryOpen
-                                                                   └─► PositionManager (state machine)
-                                                         (if in position)
-                                                           └─► ExitEngine.Manage ─► PositionManager
+OnTick ──► MarketData.IsNewBar (duplicate-bar guard)
+             └─► MarketData.GetClosedBar(1)          [shift<1 refused]
+                   └─► Indicators.Update(1, f)        [EMA/RSI/ROC/ADX/ATR]
+                         └─► MultiTimeframe.Evaluate  [H4+H1+exec alignment]
+                               └─► RegimeEngine.Evaluate   [8 regimes + conf]
+                                     └─► StructureEngine.Evaluate [swings/BOS/CHoCH]
+                                           └─► SessionEngine.Evaluate  [broker-time]
+                                                 └─► LiquidityEngine.Evaluate [sweeps]
+                                                       └─► Logger (D/I verdicts)
+                                                             └─► Diagnostics panel
 ```
 
-Execution logic never calls signal logic; signals never place orders. The only
-bridge is the explicit decision object passed down the chain.
+Not yet built (M7+): SignalEngine → ScoreEngine → SafetyEngine → RiskEngine →
+ExecutionEngine → PositionManager → ExitEngine. No decision object exists yet;
+context engines produce read-only verdicts consumed only by logging today.
 
 ## Look-ahead discipline
 
@@ -81,6 +86,13 @@ HALTED requires manual EA re-init to clear (safety latch).
 Any invalid market data, execution error, or safety breach moves the EA toward
 "do nothing" — never toward "force a trade". Repeated execution failures trip
 the emergency stop.
+
+## Known reserves (documented, not implemented)
+
+- Sweep confirmation across multiple bars (`sweep_reclaim_bars`) — config slot
+  reserved; v0.6 implements same-bar wick-through-close-back sweeps only.
+- M5 entry refinement — execution-TF label is derived from M15 itself; a
+  separate M5 context arrives with the signal engine if research justifies it.
 
 ## Future interfaces (not implemented in v0.1)
 

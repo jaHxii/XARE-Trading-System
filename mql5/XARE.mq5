@@ -1,8 +1,9 @@
 //+------------------------------------------------------------------+
 //|                                                     XARE.mq5     |
-//|        XARE — XAUUSD Adaptive Risk Engine  (v0.2.0, M2)          |
+//|        XARE — XAUUSD Adaptive Risk Engine  (v0.6.0, M2–M6)       |
 //|                                                                  |
-//| M2: market data + indicator feature layer on closed bars.        |
+//| Data/feature/context layers live: market data, indicators, MTF,  |
+//| regime, structure, session, liquidity — all on closed bars.      |
 //| Still NO trading paths — engines evaluate and log only.          |
 //| Modes (default SIGNAL_ONLY — never default to trading):          |
 //|   RESEARCH  : future home of feature CSV export                  |
@@ -27,6 +28,8 @@
 #include <XARE\MultiTimeframe.mqh>
 #include <XARE\RegimeEngine.mqh>
 #include <XARE\StructureEngine.mqh>
+#include <XARE\SessionEngine.mqh>
+#include <XARE\LiquidityEngine.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -63,6 +66,8 @@ CXareIndicators   g_ind;
 CXareMultiTimeframe g_mtf;
 CXareRegimeEngine  g_regime;
 CXareStructureEngine g_struct;
+CXareSessionEngine  g_sess;
+CXareLiquidityEngine g_liq;
 
 //--- runtime state
 string            g_symbol;
@@ -251,16 +256,24 @@ int OnInit()
       g_ind.Release();
       return INIT_FAILED;
      }
+   if(!g_sess.Init(g_symbol, _Period, g_cfg, &g_log) ||
+      !g_liq.Init(g_symbol, _Period, g_cfg, &g_log))
+     {
+      g_log.Error("INIT", "session/liquidity engine failed to initialize");
+      g_mtf.Release();
+      g_ind.Release();
+      return INIT_FAILED;
+     }
    SXareSymbolProps props;
    g_md.GetProps(props);
    g_log.Info("INIT", StringFormat("engines ready | props.valid=%s min_history=%d mtf=H4+H1+%s",
               props.valid ? "true" : "false", g_cfg.history_bars_min, g_tf_label));
 
    // 6) dashboard
-   g_ui.Init(g_cfg.dashboard_enabled, "v0.2.0");
+   g_ui.Init(g_cfg.dashboard_enabled, "v0.6.0");
 
    g_init_ok = true;
-   g_log.Info("INIT", "initialization complete (M2: data+features live, no trading)");
+   g_log.Info("INIT", "initialization complete (M2-M6 context engines live, no trading)");
    return INIT_SUCCEEDED;
   }
 
@@ -299,6 +312,31 @@ void RunSelfTest()
    if(MathAbs(XareRateOfChange(90.0, 100.0) - (-10.0)) > 1e-9){ failed++; Print("SELFTEST FAIL T3 roc down"); }
    if(XareRateOfChange(100.0, 0.0) != 0.0)                    { failed++; Print("SELFTEST FAIL T3 roc zero-div"); }
 
+   // T8 (M6): session classification priority (overlap > NY > London > Asian)
+   // windows: London 420..960, NY 750..1260, Asian 0..480 (broker minutes)
+   if(CXareSessionEngine::ClassifyStatic(900, 420,960,750,1260,0,480)
+      != XARE_SESS_OVERLAP)  { failed++; Print("SELFTEST FAIL T8 overlap"); }
+   if(CXareSessionEngine::ClassifyStatic(1100, 420,960,750,1260,0,480)
+      != XARE_SESS_NEWYORK)  { failed++; Print("SELFTEST FAIL T8 ny"); }
+   if(CXareSessionEngine::ClassifyStatic(600, 420,960,750,1260,0,480)
+      != XARE_SESS_LONDON)   { failed++; Print("SELFTEST FAIL T8 london"); }
+   if(CXareSessionEngine::ClassifyStatic(200, 420,960,750,1260,0,480)
+      != XARE_SESS_ASIAN)    { failed++; Print("SELFTEST FAIL T8 asian"); }
+   if(CXareSessionEngine::ClassifyStatic(1400, 420,960,750,1260,0,480)
+      != XARE_SESS_OFF)      { failed++; Print("SELFTEST FAIL T8 off"); }
+
+   // T8b (M6): sweep math — wick-through-close-back, depth >= mult*ATR
+   bool up, down; double pen;
+   if(!CXareLiquidityEngine::SweepStatic(2000.0, 2001.0, 1995.0, 1998.0,
+                                         2.0, 0.25, up, down, pen) || !up)
+      { failed++; Print("SELFTEST FAIL T8b sweep up"); }
+   if(CXareLiquidityEngine::SweepStatic(2000.0, 2003.0, 1999.0, 2002.0,
+                                        2.0, 0.25, up, down, pen))
+      { failed++; Print("SELFTEST FAIL T8b close-above is not a sweep"); }
+   if(CXareLiquidityEngine::SweepStatic(2000.0, 2000.3, 1999.0, 1999.5,
+                                        2.0, 0.25, up, down, pen))
+      { failed++; Print("SELFTEST FAIL T8b shallow wick is not a sweep"); }
+
    // T7 (M5): pivot confirmation math — a pivot needs lookback + confirm bars
    if(CXareStructureEngine::MinBarsForPivot(3, 2) != 5)
       { failed++; Print("SELFTEST FAIL T7 pivot math"); }
@@ -335,7 +373,7 @@ void RunSelfTest()
    double n1 = NormalizeDouble(MathRound(123.478/0.05)*0.05, 2);  // expect 123.50
    if(MathAbs(n1 - 123.50) > 1e-9)                            { failed++; Print("SELFTEST FAIL T4 tick-grid"); }
 
-   if(failed==0) Print("XARE SELF-TEST: PASS (7 groups)");
+   if(failed==0) Print("XARE SELF-TEST: PASS (8 groups)");
    else          Print("XARE SELF-TEST: FAIL (", failed, " checks)");
   }
 
@@ -418,6 +456,15 @@ void ProcessBar()
    SXareStructure structure;
    if(g_struct.Evaluate(1, structure) && structure.valid)
       g_log.Info("STRUCT", structure.evidence);
+
+   // --- M6: session then liquidity (liquidity consumes session H/L)
+   SXareSession session;
+   if(g_sess.Evaluate(1, session) && session.valid)
+      g_log.Info("SESSION", session.evidence);
+
+   SXareLiquidity liq;
+   if(g_liq.Evaluate(1, session, f.atr, liq) && liq.valid)
+      g_log.Info("LIQ", liq.evidence);
   }
 
 //+------------------------------------------------------------------+

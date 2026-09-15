@@ -48,6 +48,20 @@ struct SXareConfig
    int              pivot_confirm;       // closed bars after pivot before it counts
    int              structure_max_zones; // S/R levels kept per side
 
+   // Sessions (§13): broker SERVER time minutes-from-midnight. Verify the
+   // broker offset before trusting these (scripts/check_broker_time.py idea).
+   int              sess_asian_start;    // 0:00
+   int              sess_asian_end;      // 8:00
+   int              sess_london_start;   // 7:00
+   int              sess_london_end;     // 16:00
+   int              sess_ny_start;       // 12:30
+   int              sess_ny_end;         // 21:00
+
+   // Liquidity (§11)
+   double           sweep_atr_multiple;  // penetration depth >= this ⇒ sweep
+   int              sweep_reclaim_bars;  // close back within N bars ⇒ confirmed
+   int              swing_liquidity_lookback; // bars scanned for swing extremes
+
    // Logging / Research (§34, §37)
    int              log_level;            // 0=DEBUG 1=INFO 2=WARN 3=ERROR
    bool             research_csv_enabled; // RESEARCH mode feature rows
@@ -90,6 +104,19 @@ void XareConfigDefaults(SXareConfig &c)
    c.pivot_lookback         = 3;
    c.pivot_confirm          = 2;
    c.structure_max_zones    = 4;
+
+   // Sessions in broker server time (minutes); hypotheses pending offset check
+   c.sess_asian_start       = 0;     // 00:00
+   c.sess_asian_end         = 480;   // 08:00
+   c.sess_london_start      = 420;   // 07:00
+   c.sess_london_end        = 960;   // 16:00
+   c.sess_ny_start          = 750;   // 12:30
+   c.sess_ny_end            = 1260;  // 21:00
+
+   // Liquidity: initial hypotheses (docs/parameters.md)
+   c.sweep_atr_multiple     = 0.25;
+   c.sweep_reclaim_bars     = 3;
+   c.swing_liquidity_lookback = 40;
 
    c.log_level              = 1;      // INFO
    c.research_csv_enabled   = false;  // enabled by RESEARCH mode itself

@@ -4,6 +4,36 @@ All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).
 
+## [v0.6.0] — 2026-09-15 (M6 + integration review)
+
+### Added
+- `SessionEngine.mqh`: Asian/London/NY windows in **broker server time**
+  (minutes from midnight, configurable), overlap derived as London ∩ NY with
+  documented priority, per-episode high/low/range accumulation from closed
+  bars. Local time is never used.
+- `LiquidityEngine.mqh`: objective liquidity levels (PDH/PDL via D1 shift 1,
+  session episode extremes, recent confirmed swings) and sweep detection with
+  explicit mechanics: wick through level by ≥ `sweep_atr_multiple`·ATR with
+  close back on the origin side; close beyond = break, not sweep. Priority
+  PD > session > swing. No smart-money claims.
+- SELF_TEST groups T8 (session classifier priority) and T8b (sweep math incl.
+  negative cases: close-beyond and shallow-wick are NOT sweeps).
+- Config: session window minutes, `sweep_atr_multiple`, `sweep_reclaim_bars`
+  (reserved), `swing_liquidity_lookback` + EA inputs.
+
+### Integration review (M2–M6)
+- Data-flow chain verified consistent: new-bar gate → closed bar → features →
+  MTF → regime → structure → session → liquidity → logs/dashboard; each
+  engine consumes only upstream verdicts; no downward or sideways coupling.
+- Architecture doc updated with the implemented flow, module map additions,
+  and explicit "known reserves" section.
+- All threshold parameters now configurable in `Config.mqh` + EA inputs.
+
+### Verified
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_m6.log`).
+- EA contains no trade paths (regression-tested); nothing is validated as
+  profitable — no backtest has been run yet.
+
 ## [v0.5.0] — 2026-09-15 (M5)
 
 ### Added

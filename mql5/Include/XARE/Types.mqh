@@ -133,6 +133,44 @@ struct SXareStructure
    datetime         evaluated_at;
   };
 
+//--- broker-time sessions (spec §13); overlap = London ∩ New York (derived)
+enum ENUM_XARE_SESSION
+  {
+   XARE_SESS_OFF = 0,
+   XARE_SESS_ASIAN,
+   XARE_SESS_LONDON,
+   XARE_SESS_NEWYORK,
+   XARE_SESS_OVERLAP
+  };
+
+//--- session verdict (spec §13)
+struct SXareSession
+  {
+   bool             valid;
+   ENUM_XARE_SESSION session;
+   int              minute_of_day;  // broker server time (bar time based)
+   double           high;           // current session-episode high
+   double           low;            // current session-episode low
+   double           range;
+   int              episode_bars;   // bars in the current episode
+   string           evidence;
+   datetime         evaluated_at;
+  };
+
+//--- liquidity verdict (spec §11): objective price-based events only.
+//--- No "smart money" claims — just measurable sweep/false-break mechanics.
+struct SXareLiquidity
+  {
+   bool             valid;
+   bool             sweep_up;       // buyside level swept, close reclaimed below
+   bool             sweep_down;     // sellside level swept, close reclaimed above
+   double           swept_level;
+   string           level_name;     // PDH / PDL / SESS_HIGH / SESS_LOW / SWING_*
+   double           penetration_atr;// swept depth in ATR units
+   string           evidence;
+   datetime         evaluated_at;
+  };
+
 //--- setup types (spec §15)
 enum ENUM_XARE_SETUP
   {

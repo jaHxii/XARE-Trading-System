@@ -29,6 +29,8 @@ REQUIRED_FILES = [
     "mql5/Include/XARE/MultiTimeframe.mqh",
     "mql5/Include/XARE/RegimeEngine.mqh",
     "mql5/Include/XARE/StructureEngine.mqh",
+    "mql5/Include/XARE/SessionEngine.mqh",
+    "mql5/Include/XARE/LiquidityEngine.mqh",
 ]
 
 
@@ -84,6 +86,36 @@ def test_mtf_mixed_alignment_is_distinct():
     mtf = (REPO / "mql5/Include/XARE/MultiTimeframe.mqh").read_text(encoding="utf-8")
     assert "XARE_ALIGN_MIXED" in mtf
     assert "ClassifyStatic" in mtf  # self-testable pure classifier
+
+
+def test_sessions_use_broker_time():
+    """M6: sessions must be broker-server-time based, never local time."""
+    se = (REPO / "mql5/Include/XARE/SessionEngine.mqh").read_text(encoding="utf-8")
+    assert "TimeToStruct" in se          # bar time decomposition
+    assert "TimeLocal" not in se         # local time forbidden
+    assert "TimeLocal" not in (REPO / "mql5/XARE.mq5").read_text(encoding="utf-8")
+
+
+def test_liquidity_sweep_definition_is_objective():
+    """M6: sweep = wick through + close back; close-beyond is a break."""
+    le = (REPO / "mql5/Include/XARE/LiquidityEngine.mqh").read_text(encoding="utf-8")
+    assert "bar_close < level" in le
+    assert "bar_close > level" in le
+    assert "SweepStatic" in le           # self-testable pure math
+
+
+def test_pipeline_layering_order_in_ea():
+    """M2-M6 integration: engines must be evaluated in dependency order."""
+    ea = (REPO / "mql5/XARE.mq5").read_text(encoding="utf-8")
+    pos = {k: ea.find(k) for k in (
+        "g_ind.Update", "g_mtf.Evaluate", "g_regime.Evaluate",
+        "g_struct.Evaluate", "g_sess.Evaluate", "g_liq.Evaluate")}
+    order = sorted(pos.items(), key=lambda kv: kv[1])
+    assert [k for k, _ in order] == [
+        "g_ind.Update", "g_mtf.Evaluate", "g_regime.Evaluate",
+        "g_struct.Evaluate", "g_sess.Evaluate", "g_liq.Evaluate"], \
+        f"pipeline order broken: {pos}"
+    assert all(v >= 0 for v in pos.values())
 
 
 def test_structure_pivot_confirmation_documented():
