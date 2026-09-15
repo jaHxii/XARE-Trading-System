@@ -73,6 +73,35 @@ struct SXareConfig
    double           min_setup_confidence;  // setup-level floor (0..100)
    int              retest_valid_bars;     // break must be recent to retest
 
+   // SL/TP construction (§20/§21). Modes are hypotheses.
+   ENUM_XARE_SL_MODE sl_mode;           // hybrid default: max(structure, ATR)
+   double           sl_atr_mult;        // ATR multiplier for ATR/hybrid SL
+   ENUM_XARE_TP_MODE tp_mode;           // fixed-R default
+   double           tp_r_multiple;      // TP = SL distance × this
+   double           tp_atr_mult;        // TP when tp_mode=ATR_MULT
+
+   // Risk (§18/§19/§24/§25/§26/§27/§50). All defaults preserve capital.
+   double           risk_per_trade_pct;     // % equity risked per trade
+   double           risk_floor_pct;         // never risk below this (skip instead)
+   double           daily_loss_limit_pct;   // % equity: stop opening trades
+   double           weekly_loss_limit_pct;
+   double           dd_caution_pct;         // peak-DD states (§25)
+   double           dd_reduced_pct;
+   double           dd_halt_pct;
+   int              max_consecutive_losses; // streak cooldown trigger
+   int              cooldown_bars;          // pause length in bars
+   int              max_trades_per_day;
+   int              max_concurrent_positions;
+   bool             close_on_daily_limit;   // §24: default NO (stop opening only)
+   double           risk_mult_caution;      // risk scale in CAUTION state (<=1)
+   double           risk_mult_reduced;      // risk scale in REDUCED state (<=1)
+   ENUM_TIMEFRAMES  working_tf;             // bar-time anchor for cooldowns
+
+   // Execution (§29) + small-account guard (§49)
+   long             emergency_max_lot_x1000; // hard volume ceiling ×1000 (lots)
+   double           max_margin_pct;          // refuse if margin > this % of free
+   bool             allow_min_lot_override;  // §49 high-risk override; default OFF
+
    // Scoring (§16). Weights are INITIAL HYPOTHESES (sum 100), docs/parameters.md.
    double           w_trend;             // 20
    double           w_mtf;               // 15
@@ -153,6 +182,35 @@ void XareConfigDefaults(SXareConfig &c)
    c.pullback_ema_zone_atr    = 1.2;
    c.min_setup_confidence     = 55.0;
    c.retest_valid_bars        = 8;
+
+   // SL/TP: hybrid SL, fixed-R TP — all hypotheses (docs/parameters.md)
+   c.sl_mode                 = XARE_SL_HYBRID;
+   c.sl_atr_mult             = 1.5;
+   c.tp_mode                 = XARE_TP_FIXED_R;
+   c.tp_r_multiple           = 2.0;
+   c.tp_atr_mult             = 3.0;
+
+   // Risk: capital-preservation defaults (docs/parameters.md)
+   c.risk_per_trade_pct      = 0.5;
+   c.risk_floor_pct          = 0.10;   // below 0.10% ⇒ skip, never oversized
+   c.daily_loss_limit_pct    = 2.0;
+   c.weekly_loss_limit_pct   = 5.0;
+   c.dd_caution_pct          = 5.0;
+   c.dd_reduced_pct          = 10.0;
+   c.dd_halt_pct             = 15.0;
+   c.max_consecutive_losses  = 3;
+   c.cooldown_bars           = 4;
+   c.max_trades_per_day      = 3;
+   c.max_concurrent_positions= 1;      // §32: one position per symbol (v1)
+   c.close_on_daily_limit    = false;  // §24 default: stop opening, keep managing
+   c.risk_mult_caution       = 0.5;    // only downward, never up (§31)
+   c.risk_mult_reduced       = 0.25;
+   c.working_tf              = PERIOD_M15;  // EA overrides with chart period
+
+   // Execution: hard ceilings (docs/parameters.md)
+   c.emergency_max_lot_x1000 = 500;    // 0.50 lots hard cap
+   c.max_margin_pct          = 50.0;   // refuse if required margin > 50% of free
+   c.allow_min_lot_override  = false;  // §49: default SAFE
 
    // Scoring weights + bands: hypotheses (docs/parameters.md)
    c.w_trend                 = 20.0;

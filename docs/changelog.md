@@ -4,6 +4,42 @@ All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).
 
+## [v0.9.0] — 2026-09-15 (M9)
+
+### Added
+- `RiskEngine.mqh`: pure financial-math core + stateful risk tracker.
+  - Point value per lot derived **only** from live broker properties
+    (`tick_value × point / tick_size`) — nothing about XAUUSD contracts is
+    assumed; invalid properties refuse sizing outright.
+  - Volume-for-risk with **down-only snapping** to the broker volume step,
+    min/max clamps, and an emergency hard lot ceiling; safe volume below the
+    broker minimum ⇒ **trade skipped** (never padded up; §49 override off).
+  - Drawdown state ladder (NORMAL/CAUTION/REDUCED/HALTED) from peak and
+    daily drawdown; risk scaled **down only** per state; HALTED = zero risk.
+  - Broker-server-time daily/weekly anchors and rollovers, trade counter,
+    consecutive-loss streak with bar-based cooldown.
+  - Stop distance (ATR / structure / hybrid-widest with hard floor) and TP
+    distance (fixed-R / ATR) pure builders — no fixed dollar distances.
+- EA: risk inputs (conservative defaults: 0.5% risk, 2% daily, 5% weekly,
+  15% halt, 1 position, 0.5-lot emergency cap), risk refresh on every tick,
+  live risk state + daily P/L + drawdown on the dashboard.
+- SELF_TEST group T13: point value (standard + odd tick), sizing, below-min
+  refusal, emergency cap, step snap-down, invalid properties, state ladder,
+  effective-risk scaling, SL/TP builders incl. wrong-side structure and
+  no-basis refusal, cooldown math.
+- Python mirror tests `test_risk_math.py` (21 tests) incl. a regression:
+  a 0.1-step account with raw 0.02 lots must be **refused**, not snapped to
+  the minimum (which would exceed the configured risk).
+
+### Fixed
+- `Indicators.mqh`: `Last()` returned a never-written cache (features never
+  copied into `m_cache` after `Update`) — latent M2 bug, found during M9
+  review; dashboard feature display would have been zeros.
+
+### Verified
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_m9.log`).
+- Python suite: 64 passed. No trade paths yet (orders arrive in M10).
+
 ## [v0.8.0] — 2026-09-15 (M8)
 
 ### Added

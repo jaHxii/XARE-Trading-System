@@ -240,6 +240,49 @@ enum ENUM_XARE_SAFETY_VERDICT
    XARE_SAFETY_BLOCK         // reason string mandatory when blocked
   };
 
+//--- block reasons (spec §33): every refused trade maps to exactly one code.
+//--- Order matters only for readability; always pair with a detail string.
+enum ENUM_XARE_BLOCK_REASON
+  {
+   XARE_BR_NONE = 0,
+   XARE_BR_TRADING_OFF,          // global switch / mode never trades
+   XARE_BR_RISK_HALTED,          // drawdown/streak halt latch
+   XARE_BR_EMERGENCY,            // emergency shutdown latch
+   XARE_BR_DAILY_LOSS,           // daily loss limit reached
+   XARE_BR_WEEKLY_LOSS,          // weekly loss limit reached
+   XARE_BR_DRAWDOWN_STATE,       // risk state REDUCED/HALTED via DD
+   XARE_BR_COOLDOWN_LOSSES,      // consecutive-loss cooldown active
+   XARE_BR_MAX_TRADES_DAY,       // daily trade-count cap
+   XARE_BR_MAX_POSITIONS,        // concurrent-position cap
+   XARE_BR_SPREAD,               // spread above entry limit
+   XARE_BR_SPREAD_ABNORMAL,      // abnormal spread condition
+   XARE_BR_NEWS,                 // news blackout (only with real data)
+   XARE_BR_NO_QUOTES,            // bid/ask unavailable or invalid
+   XARE_BR_SYMBOL_STATE,         // symbol trade mode disabled/restricted
+   XARE_BR_MARGIN,               // margin required exceeds safe budget
+   XARE_BR_STOPS_LEVEL,          // SL/TP inside broker stops/freeze zone
+   XARE_BR_VOLUME,               // volume invalid / below min / above cap
+   XARE_BR_NO_TRADE_BAND,        // score below trade band
+   XARE_BR_EXEC_FAILURE,         // execution failure streak latch
+   XARE_BR_DATA_STALE,           // market data staleness beyond tolerance
+   XARE_BR_SL_INVALID,           // no acceptable hard SL could be built
+   XARE_BR_TP_INVALID            // no acceptable TP could be built
+  };
+
+//--- stop-loss / take-profit construction policies (spec §20/§21)
+enum ENUM_XARE_SL_MODE
+  {
+   XARE_SL_ATR = 0,        // ATR × multiplier
+   XARE_SL_STRUCTURE,      // structural swing level
+   XARE_SL_HYBRID          // max(structural, ATR) — conservative default
+  };
+
+enum ENUM_XARE_TP_MODE
+  {
+   XARE_TP_FIXED_R = 0,    // SL distance × R multiple
+   XARE_TP_ATR_MULT        // ATR × multiple
+  };
+
 //--- score bands (spec §16); thresholds are configurable hypotheses
 enum ENUM_XARE_SCORE_BAND
   {
@@ -311,16 +354,23 @@ struct SXareSignal
    datetime         bar_time;       // signal bar (closed bar time)
   };
 
-//--- a fully-priced trade decision handed to execution (spec §18-21)
+//--- a fully-priced trade decision handed to execution (spec §18-21).
+//--- actionable=false is a valid outcome: block_reason says why (§33).
 struct SXareTradeDecision
   {
    bool             actionable;
+   ENUM_XARE_BLOCK_REASON block_reason;   // when not actionable
+   string           block_detail;
    int              direction;      // +1 buy, -1 sell
    double           entry_price;    // expected entry (bid/ask at decision)
    double           sl_price;
    double           tp_price;
    double           volume;         // broker-normalized lots
    double           risk_pct;       // effective risk % (may be reduced state)
+   double           risk_money;     // equity × effective risk %
+   double           sl_points;      // SL distance in points
+   double           tp_points;      // TP distance in points
+   double           planned_r;      // tp_points / sl_points
    double           score;
    ENUM_XARE_SETUP  setup;
    string           session;
@@ -337,6 +387,24 @@ struct SXareExecutionResult
    double           slippage_points;
    uint             retcode;
    string           comment;
+  };
+
+//--- risk-engine snapshot for logs + dashboard (spec §24/§25)
+struct SXareRiskSnapshot
+  {
+   bool             ready;
+   ENUM_XARE_RISK_STATE state;
+   double           equity;
+   double           peak_equity;
+   double           day_start_equity;
+   double           daily_pl;        // equity − day_start (incl. floating)
+   double           daily_dd_pct;    // loss below day start, %
+   double           weekly_dd_pct;
+   double           current_dd_pct;  // from peak, %
+   int              trades_today;
+   int              consecutive_losses;
+   bool             cooldown_active;
+   datetime         cooldown_until;
   };
 
 //--- open position context kept by the PositionManager
@@ -431,6 +499,36 @@ string XareExitToString(const ENUM_XARE_EXIT_REASON r)
       case XARE_EXIT_REGIME_FLIP:     return "REGIME_FLIP";
       case XARE_EXIT_SIGNAL_REVERSAL: return "SIGNAL_REVERSAL";
       case XARE_EXIT_EMERGENCY:       return "EMERGENCY";
+      default:                        return "NONE";
+     }
+  }
+
+string XareBlockReasonToString(const ENUM_XARE_BLOCK_REASON r)
+  {
+   switch(r)
+     {
+      case XARE_BR_TRADING_OFF:       return "TRADING_OFF";
+      case XARE_BR_RISK_HALTED:       return "RISK_HALTED";
+      case XARE_BR_EMERGENCY:         return "EMERGENCY";
+      case XARE_BR_DAILY_LOSS:        return "DAILY_LOSS";
+      case XARE_BR_WEEKLY_LOSS:       return "WEEKLY_LOSS";
+      case XARE_BR_DRAWDOWN_STATE:    return "DRAWDOWN_STATE";
+      case XARE_BR_COOLDOWN_LOSSES:   return "COOLDOWN_LOSSES";
+      case XARE_BR_MAX_TRADES_DAY:    return "MAX_TRADES_DAY";
+      case XARE_BR_MAX_POSITIONS:     return "MAX_POSITIONS";
+      case XARE_BR_SPREAD:            return "SPREAD";
+      case XARE_BR_SPREAD_ABNORMAL:   return "SPREAD_ABNORMAL";
+      case XARE_BR_NEWS:              return "NEWS";
+      case XARE_BR_NO_QUOTES:         return "NO_QUOTES";
+      case XARE_BR_SYMBOL_STATE:      return "SYMBOL_STATE";
+      case XARE_BR_MARGIN:            return "MARGIN";
+      case XARE_BR_STOPS_LEVEL:       return "STOPS_LEVEL";
+      case XARE_BR_VOLUME:            return "VOLUME";
+      case XARE_BR_NO_TRADE_BAND:     return "NO_TRADE_BAND";
+      case XARE_BR_EXEC_FAILURE:      return "EXEC_FAILURE";
+      case XARE_BR_DATA_STALE:        return "DATA_STALE";
+      case XARE_BR_SL_INVALID:        return "SL_INVALID";
+      case XARE_BR_TP_INVALID:        return "TP_INVALID";
       default:                        return "NONE";
      }
   }

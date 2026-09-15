@@ -132,6 +132,7 @@ public:
       if(ok && out.bar_time > 0 && out.ema_slow > 0 && out.ema_slow != EMPTY_VALUE)
         {
          out.valid        = true;
+         m_cache          = out;   // keep Last() consistent with Update() (bugfix v0.9.0)
          m_have_features  = true;
         }
       return out.valid;

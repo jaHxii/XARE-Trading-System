@@ -1,12 +1,14 @@
 //+------------------------------------------------------------------+
 //|                                                     XARE.mq5     |
-//|        XARE — XAUUSD Adaptive Risk Engine  (v0.8.0, M7–M8)       |
+//|        XARE — XAUUSD Adaptive Risk Engine  (v0.9.0, M9)          |
 //|                                                                  |
 //| Data/feature/context layers live: market data, indicators, MTF,  |
 //| regime, structure, session, liquidity — all on closed bars.      |
 //| M7 signal engine (6 setups + NO_TRADE reasons) and M8 scoring    |
 //| (0–100 weighted breakdown) are wired.                            |
-//| Still NO trading paths — engines evaluate and log only.          |
+//| M9 risk engine: dynamic sizing from broker properties, daily/    |
+//| weekly loss limits, drawdown states, streak cooldown.            |
+//| STILL no orders — execution arrives in M10 behind safety gates.  |
 //| Modes (default SIGNAL_ONLY — never default to trading):          |
 //|   RESEARCH  : future home of feature CSV export                  |
 //|   SIGNAL_ONLY: evaluate + report, never place orders             |
@@ -19,7 +21,7 @@
 #property link        "https://github.com/jaHxii/XARE-Trading-System"
 #property version     "1.00"  // display-only: this compiler rejects 0.x majors (warning 68).
                                      // Authoritative version: v0.1.0 — see docs/changelog.md + git tag.  // x.yy format required by MetaEditor; semver v0.1.0 in changelog/tag
-#property description "XARE — XAUUSD Adaptive Risk Engine (research build, M8)"
+#property description "XARE — XAUUSD Adaptive Risk Engine (research build, M9)"
 
 #include <XARE\Types.mqh>
 #include <XARE\Config.mqh>
@@ -34,6 +36,7 @@
 #include <XARE\LiquidityEngine.mqh>
 #include <XARE\SignalEngine.mqh>
 #include <XARE\ScoreEngine.mqh>
+#include <XARE\RiskEngine.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -82,6 +85,26 @@ input double         InpScoreCandidate  = 70.0;                  // Band: candid
 input double         InpScoreTrade      = 80.0;                  // Band: trade from
 input double         InpScoreStrong     = 85.0;                  // Band: strong from
 
+input group  "Risk (v0.9: conservative defaults, docs/parameters.md)"
+input double         InpRiskPerTradePct = 0.5;                   // Risk per trade (% equity)
+input double         InpRiskFloorPct    = 0.10;                  // Risk floor (%; below = skip)
+input double         InpDailyLossPct    = 2.0;                   // Daily loss limit (% equity)
+input double         InpWeeklyLossPct   = 5.0;                   // Weekly loss limit (% equity)
+input double         InpDDCautionPct    = 5.0;                   // DD: caution state from (%)
+input double         InpDDReducedPct    = 10.0;                  // DD: reduced state from (%)
+input double         InpDDHaltPct       = 15.0;                  // DD: halt state from (%)
+input double         InpRiskMultCaution = 0.5;                   // Risk x in CAUTION
+input double         InpRiskMultReduced = 0.25;                  // Risk x in REDUCED
+input int            InpMaxConsecLosses = 3;                     // Loss streak -> cooldown
+input int            InpCooldownBars    = 4;                     // Cooldown length (bars)
+input int            InpMaxTradesPerDay = 3;                     // Max trades per day
+input int            InpMaxPositions    = 1;                     // Max concurrent positions
+input bool           InpCloseOnDailyLim = false;                 // Close positions at daily limit
+input double         InpSLAtrMult       = 1.5;                   // SL: ATR multiplier
+input double         InpTPRMultiple     = 2.0;                   // TP: R multiple of SL
+input double         InpEmergMaxLot     = 0.50;                  // Emergency max lot (hard cap)
+input double         InpMaxMarginPct    = 50.0;                  // Max margin (% of free)
+
 input group  "Logging"
 input int            InpLogLevel        = 1;                     // 0=DEBUG 1=INFO 2=WARN 3=ERROR
 input bool           InpJournalCSV      = true;                  // Enable trade journal CSV
@@ -99,6 +122,7 @@ CXareSessionEngine  g_sess;
 CXareLiquidityEngine g_liq;
 CXareSignalEngine   g_sig;
 CXareScoreEngine    g_score;
+CXareRiskEngine     g_risk;
 
 //--- last bar decision (for dashboard; signal-only — nothing is executed)
 SXareDecision     g_last_decision;
@@ -263,6 +287,27 @@ int OnInit()
    g_cfg.score_trade             = InpScoreTrade;
    g_cfg.score_strong            = InpScoreStrong;
 
+   // M9: risk group
+   g_cfg.risk_per_trade_pct      = InpRiskPerTradePct;
+   g_cfg.risk_floor_pct          = InpRiskFloorPct;
+   g_cfg.daily_loss_limit_pct    = InpDailyLossPct;
+   g_cfg.weekly_loss_limit_pct   = InpWeeklyLossPct;
+   g_cfg.dd_caution_pct          = InpDDCautionPct;
+   g_cfg.dd_reduced_pct          = InpDDReducedPct;
+   g_cfg.dd_halt_pct             = InpDDHaltPct;
+   g_cfg.risk_mult_caution       = InpRiskMultCaution;
+   g_cfg.risk_mult_reduced       = InpRiskMultReduced;
+   g_cfg.max_consecutive_losses  = InpMaxConsecLosses;
+   g_cfg.cooldown_bars           = InpCooldownBars;
+   g_cfg.max_trades_per_day      = InpMaxTradesPerDay;
+   g_cfg.max_concurrent_positions= InpMaxPositions;
+   g_cfg.close_on_daily_limit    = InpCloseOnDailyLim;
+   g_cfg.sl_atr_mult             = InpSLAtrMult;
+   g_cfg.tp_r_multiple           = InpTPRMultiple;
+   g_cfg.emergency_max_lot_x1000 = (long)MathRound(InpEmergMaxLot * 1000.0);
+   g_cfg.max_margin_pct          = InpMaxMarginPct;
+   g_cfg.working_tf              = _Period;
+
    // 2) logger
    if(!g_log.Init(g_symbol, g_cfg.magic, g_cfg.log_level,
                   g_cfg.journal_csv_enabled, g_cfg.journal_dir))
@@ -278,7 +323,7 @@ int OnInit()
       default:         g_tf_label=EnumToString(_Period);
      }
 
-   g_log.Info("INIT", StringFormat("XARE v0.8.0 starting | mode=%s trading=%s symbol=%s tf=%s",
+   g_log.Info("INIT", StringFormat("XARE v0.9.0 starting | mode=%s trading=%s symbol=%s tf=%s",
               XareModeToString(g_cfg.mode),
               g_cfg.trading_enabled?"ON":"OFF", g_symbol, g_tf_label));
 
@@ -343,14 +388,21 @@ int OnInit()
    g_score.Init(g_cfg); // pure engine; cannot fail
    SXareSymbolProps props;
    g_md.GetProps(props);
+   g_risk.Init(g_cfg, props);   // anchors equity/day/week at init
+   if(g_risk.Ready())
+      g_log.Info("RISK", StringFormat("risk anchors set | equity=%.2f risk/trade=%.2f%% daily_limit=%.2f%%",
+                 AccountInfoDouble(ACCOUNT_EQUITY), g_cfg.risk_per_trade_pct,
+                 g_cfg.daily_loss_limit_pct));
+   else
+      g_log.Warn("RISK", "equity unavailable at init — risk engine idle until first Update");
    g_log.Info("INIT", StringFormat("engines ready | props.valid=%s min_history=%d mtf=H4+H1+%s",
               props.valid ? "true" : "false", g_cfg.history_bars_min, g_tf_label));
 
    // 6) dashboard
-   g_ui.Init(g_cfg.dashboard_enabled, "v0.8.0");
+   g_ui.Init(g_cfg.dashboard_enabled, "v0.9.0");
 
    g_init_ok = true;
-   g_log.Info("INIT", "initialization complete (M2-M6 context engines live, no trading)");
+   g_log.Info("INIT", "initialization complete (M2-M6 context, M7/M8 signals/score, M9 risk; no orders yet)");
    return INIT_SUCCEEDED;
   }
 
@@ -509,6 +561,87 @@ void RunSelfTest()
    if(d10e.has_signal || d10e.nt_reason != XARE_NT_ALIGNMENT_CONFLICT)
       { failed++; Print("SELFTEST FAIL T10e conflict-beats-sweep"); }
 
+   // T13 (M9): financial math on synthetic (NOT assumed) broker properties --
+   SXareSymbolProps gold_like;   // 100oz-style contract; values are test data only
+   gold_like.symbol="TEST"; gold_like.digits=2; gold_like.point=0.01;
+   gold_like.tick_size=0.01; gold_like.tick_value=1.0; gold_like.contract_size=100.0;
+   gold_like.volume_min=0.01; gold_like.volume_max=100.0; gold_like.volume_step=0.01;
+   gold_like.stops_level=0; gold_like.freeze_level=0; gold_like.trade_mode=4; gold_like.valid=true;
+
+   // point value = tick_value x (point/tick_size)
+   if(MathAbs(XarePointValuePerLot(gold_like) - 1.0) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T13 point-value"); }
+   SXareSymbolProps odd = gold_like; odd.tick_size = 0.05; odd.tick_value = 2.5;
+   if(MathAbs(XarePointValuePerLot(odd) - 0.5) > 1e-9)   // 2.5 x (0.01/0.05)
+      { failed++; Print("SELFTEST FAIL T13 odd-tick"); }
+
+   // sizing: equity 1000 @ 1% = 10; SL 500pts x $1/lot = $500/lot -> 0.02
+   double v9, rm9;
+   if(!XareVolumeForRisk(1000.0, 1.0, 500.0, gold_like, 50.0, v9, rm9) ||
+      MathAbs(v9 - 0.02) > 1e-9 || MathAbs(rm9 - 10.0) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T13 sizing-basic"); }
+   // below broker minimum -> refused, never padded up (§19/§49)
+   if(XareVolumeForRisk(1000.0, 0.01, 500.0, gold_like, 50.0, v9, rm9))
+      { failed++; Print("SELFTEST FAIL T13 below-min-refused"); }
+   // emergency cap enforced even with huge equity (§50)
+   if(!XareVolumeForRisk(100000.0, 5.0, 500.0, gold_like, 0.5, v9, rm9) ||
+      MathAbs(v9 - 0.5) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T13 emergency-cap"); }
+   // volume step snaps DOWN only (raw 0.54 -> 0.5)
+   SXareSymbolProps stepy = gold_like; stepy.volume_step = 0.1;
+   if(!XareVolumeForRisk(1000.0, 1.08, 20.0, stepy, 50.0, v9, rm9) ||
+      MathAbs(v9 - 0.5) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T13 snap-down"); }
+   // invalid properties are refused outright
+   SXareSymbolProps badp = gold_like; badp.valid = false;
+   if(XareVolumeForRisk(1000.0, 1.0, 500.0, badp, 50.0, v9, rm9))
+      { failed++; Print("SELFTEST FAIL T13 invalid-props"); }
+
+   // drawdown -> state ladder (§25)
+   if(XareRiskStateFromDD(1.0, 5.0, 10.0, 15.0)  != XARE_RISK_NORMAL)  { failed++; Print("SELFTEST FAIL T13 state-normal"); }
+   if(XareRiskStateFromDD(6.0, 5.0, 10.0, 15.0)  != XARE_RISK_CAUTION) { failed++; Print("SELFTEST FAIL T13 state-caution"); }
+   if(XareRiskStateFromDD(11.0, 5.0, 10.0, 15.0) != XARE_RISK_REDUCED) { failed++; Print("SELFTEST FAIL T13 state-reduced"); }
+   if(XareRiskStateFromDD(16.0, 5.0, 10.0, 15.0) != XARE_RISK_HALTED)  { failed++; Print("SELFTEST FAIL T13 state-halt"); }
+
+   // effective risk scales DOWN only; HALTED is a hard zero (§31)
+   if(MathAbs(XareEffectiveRiskPct(XARE_RISK_REDUCED, 0.5, 0.5, 0.25) - 0.125) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T13 eff-risk"); }
+   if(XareEffectiveRiskPct(XARE_RISK_HALTED, 0.5, 0.5, 0.25) != 0.0)
+      { failed++; Print("SELFTEST FAIL T13 halted-zero"); }
+
+   // stop distances: hybrid = max(ATR x mult, structure); floor respected
+   double sd9;
+   if(!XareStopDistance(1, 2000.0, 1990.0, 4.0, 1.5, XARE_SL_HYBRID, 1.0, sd9) ||
+      MathAbs(sd9 - 10.0) > 1e-9)      // structure 10 > ATR 6
+      { failed++; Print("SELFTEST FAIL T13 hybrid-structure"); }
+   if(!XareStopDistance(1, 2000.0, 1990.0, 10.0, 1.5, XARE_SL_HYBRID, 1.0, sd9) ||
+      MathAbs(sd9 - 15.0) > 1e-9)      // ATR 15 > structure 10
+      { failed++; Print("SELFTEST FAIL T13 hybrid-atr"); }
+   if(!XareStopDistance(1, 2000.0, 1990.0, 4.0, 1.5, XARE_SL_ATR, 1.0, sd9) ||
+      MathAbs(sd9 - 6.0) > 1e-9)       // ATR mode ignores structure
+      { failed++; Print("SELFTEST FAIL T13 atr-mode"); }
+   // structure on the wrong side is ignored (short: 1990 is above... no —
+   // below close; not protective) -> falls back to ATR distance
+   if(!XareStopDistance(-1, 2000.0, 1990.0, 4.0, 1.5, XARE_SL_HYBRID, 1.0, sd9) ||
+      MathAbs(sd9 - 6.0) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T13 struct-side"); }
+   // no basis for a stop at all -> refuse, never fabricate a distance
+   if(XareStopDistance(1, 2000.0, 0.0, 0.0, 0.0, XARE_SL_ATR, 25.0, sd9))
+      { failed++; Print("SELFTEST FAIL T13 no-basis-refused"); }
+
+   // TP distances (§21)
+   double td9;
+   if(!XareTpDistance(XARE_TP_FIXED_R, 30.0, 4.0, 2.0, 3.0, td9) || MathAbs(td9 - 60.0) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T13 tp-fixed-r"); }
+   if(!XareTpDistance(XARE_TP_ATR_MULT, 30.0, 4.0, 2.0, 3.0, td9) || MathAbs(td9 - 12.0) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T13 tp-atr"); }
+   if(XareTpDistance(XARE_TP_FIXED_R, 0.0, 4.0, 2.0, 3.0, td9))
+      { failed++; Print("SELFTEST FAIL T13 tp-zero-sl"); }
+
+   // cooldown = bar_time + N bars x period seconds (§26)
+   if(XareCooldownUntil(D'2026.01.05 10:00', 4, 900) != (datetime)(D'2026.01.05 10:00' + 4*900))
+      { failed++; Print("SELFTEST FAIL T13 cooldown"); }
+
    // T7 (M5): pivot confirmation math — a pivot needs lookback + confirm bars
    if(CXareStructureEngine::MinBarsForPivot(3, 2) != 5)
       { failed++; Print("SELFTEST FAIL T7 pivot math"); }
@@ -585,7 +718,7 @@ void RunSelfTest()
    if(scT.Score(d12d, ft, mt, stp, lq, XARE_SESS_LONDON, 50.0, s12d))
       { failed++; Print("SELFTEST FAIL T12 no-signal-not-scored"); }
 
-   if(failed==0) Print("XARE SELF-TEST: PASS (12 groups)");
+   if(failed==0) Print("XARE SELF-TEST: PASS (13 groups)");
    else          Print("XARE SELF-TEST: FAIL (", failed, " checks)");
   }
 
@@ -754,6 +887,9 @@ void OnTick()
 
    Heartbeat();
 
+   // --- M9: risk engine refresh (rollovers, peak, states) --------------
+   g_risk.Update();
+
    // --- M2: new-bar gate + duplicate processing guard -----------------
    if(g_md.IsNewBar())
      {
@@ -772,8 +908,16 @@ void OnTick()
                         XareSetupToString(g_last_decision.setup))
          : StringFormat("NO_TRADE(%s)", XareNoTradeToString(g_last_decision.nt_reason));
    int    open_xare   = 0;   // PositionManager counts by magic from M11
-   double daily_pl    = 0.0;   // RiskEngine from M9
-   double dd_pct      = 0.0;   // RiskEngine from M9
+   double daily_pl    = 0.0;
+   double dd_pct      = 0.0;
+   string risk_s      = "N/A";
+   if(g_risk.Ready())
+     {
+      SXareRiskSnapshot rs = g_risk.Snapshot();
+      daily_pl = rs.daily_pl;
+      dd_pct   = rs.current_dd_pct;
+      risk_s   = XareRiskStateToString(rs.state);
+     }
    double ui_score    = 0.0;
    string ui_regime   = "UNKNOWN";
    int    ui_conf     = 0;
@@ -787,8 +931,7 @@ void OnTick()
 
    g_ui.Update(g_symbol, g_tf_label, g_cfg.mode, price, spread_pts,
                ui_regime, ui_conf, decision_txt, ui_score,
-               XareRiskStateToString(XARE_RISK_NORMAL),
-               daily_pl, dd_pct, open_xare, "N/A",
+               risk_s, daily_pl, dd_pct, open_xare, "N/A",
                /*trading_allowed=*/false);
   }
 //+------------------------------------------------------------------+
