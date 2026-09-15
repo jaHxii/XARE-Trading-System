@@ -1,0 +1,9 @@
+# XARE Python research tooling dependencies
+# Install: pip install -r python/requirements.txt
+# Python >= 3.10 recommended (developed on 3.12)
+
+pandas>=2.0
+numpy>=1.26
+matplotlib>=3.8
+scipy>=1.11
+pytest>=8.0
