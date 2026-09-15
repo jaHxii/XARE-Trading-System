@@ -4,6 +4,42 @@ All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).
 
+## [v0.14.0] — 2026-09-15 (M13–M18)
+
+### Added
+- **M13** `ResearchLogger.mqh`: per-closed-bar feature/verdict CSV (§37,
+  features only — no future outcomes), RESEARCH mode only; explicit
+  initialization of every verdict struct before `Evaluate` (fixed a latent
+  M7-era uninitialized-read now exposed by the research row).
+  `PerformanceTracker.mqh`: rolling closed-trade stats (§39 subset) + the
+  §17 expectancy filter that **abstains below 30 trades and blocks only on
+  clearly negative expectancy + PF<1** — never invents values.
+- **M14** `python/xare/`: `metrics.py` (all §39 metrics incl. Sharpe,
+  Sortino, recovery factor, drawdown %, streaks), `breakdown()` by
+  regime/session/setup/direction, monthly/yearly returns; `warnings.py`
+  (§44 sample-size/overfit/concentration/drawdown warnings + ROBUST /
+  QUESTIONABLE / OVERFIT_RISK / FAIL classifier); `visualization.py`
+  (headless equity/drawdown/R-histogram PNGs).
+- **M15** `report.py`: full §55 report with every required metric and
+  breakdown section; **explicit `NOT EXECUTED` status when no journal
+  exists** — no fabricated numbers (§60). `cli.py`: `report`,
+  `walk-forward`, `monte-carlo` commands over a real journal CSV.
+- **M16** `walk_forward.py`: rolling TRAIN→TEST windows, every window
+  reported (bad windows never hidden), explicit negative-window counts.
+- **M17** `monte_carlo.py`: shuffle + bootstrap resampling with fixed seed,
+  drawdown/streak/terminal-return percentiles, breach probability, and a
+  mandatory disclaimer that it models randomness, not profitability.
+- **M18** `stability.py`: neighbor-perturbation sensitivity over a caller
+  supplied evaluator; plateau verdict (ROBUST / QUESTIONABLE /
+  OVERFIT_RISK / NOT EVALUATED) — stable regions, not magic values.
+- Tests: 25 new analytics tests (134 total passing).
+
+### Honest status
+- **No backtest has been executed.** The Python framework is fully
+  exercised on synthetic deterministic fixtures; every real-data path is
+  gated on a journal that does not exist yet, and reports render as
+  `NOT EXECUTED` until then.
+
 ## [v0.12.0] — 2026-09-15 (M10–M12)
 
 ### Added

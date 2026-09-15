@@ -131,6 +131,8 @@ struct SXareConfig
    bool             research_csv_enabled; // RESEARCH mode feature rows
    bool             journal_csv_enabled;  // trade journal (§69)
    string           journal_dir;          // under MQL5\Files
+   int              expectancy_min_trades;// §17: gate disabled below this sample
+   double           expectancy_block_r;   // §17: block when expR <= -this AND pf<1
   };
 
 //--- defaults: safety-first (spec §63). Values are hypotheses (docs/parameters.md)
@@ -250,6 +252,8 @@ void XareConfigDefaults(SXareConfig &c)
    c.research_csv_enabled   = false;  // enabled by RESEARCH mode itself
    c.journal_csv_enabled    = true;
    c.journal_dir            = "XARE";
+   c.expectancy_min_trades  = 30;     // §17: abstain (never block) below this
+   c.expectancy_block_r     = 0.10;   // clearly-negative threshold
   }
 
 #endif // __XARE_CONFIG_MQH__

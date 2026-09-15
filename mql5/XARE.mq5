@@ -48,6 +48,8 @@
 #include <XARE\ExitEngine.mqh>
 #include <XARE\SafetyEngine.mqh>
 #include <XARE\NewsFilter.mqh>
+#include <XARE\ResearchLogger.mqh>
+#include <XARE\PerformanceTracker.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -119,6 +121,8 @@ input double         InpMaxMarginPct    = 50.0;                  // Max margin (
 input group  "Safety (v0.12: fail-safe defaults)"
 input int            InpNewsBeforeMin   = 30;                    // News blackout before HIGH event (min)
 input int            InpNewsAfterMin    = 30;                    // News blackout after HIGH event (min)
+input int            InpExpectMinTrades = 30;                    // Expectancy gate: min closed trades
+input double         InpExpectBlockR    = 0.10;                  // Expectancy gate: block below -R
 
 input group  "Logging"
 input int            InpLogLevel        = 1;                     // 0=DEBUG 1=INFO 2=WARN 3=ERROR
@@ -143,6 +147,8 @@ CXarePositionManager g_pos;
 CXareExitEngine     g_exit;
 CXareSafetyEngine   g_safety;
 CXareNewsFilter     g_news;
+CXareResearchLogger g_res;
+CXarePerformanceTracker g_perf;
 
 //--- last bar decision (for dashboard; signal-only — nothing is executed)
 SXareDecision     g_last_decision;
@@ -414,6 +420,11 @@ int OnInit()
    g_exit.Init(g_cfg);  // pure management decisions
    g_safety.Init();     // gatekeeper + emergency latch
    g_news.Init(InpNewsBeforeMin, InpNewsAfterMin);  // §14 fail-safe filter
+   g_cfg.expectancy_min_trades = InpExpectMinTrades;
+   g_cfg.expectancy_block_r    = InpExpectBlockR;
+   g_perf.Init(g_cfg);  // §17/§39 rolling stats (abstains until sample ready)
+   if(!g_res.Init(g_cfg.mode == XARE_MODE_RESEARCH, g_cfg.journal_dir))
+      g_log.Warn("INIT", "research CSV unavailable — continuing without it");
    SXareSymbolProps props;
    g_md.GetProps(props);
    g_risk.Init(g_cfg, props);   // anchors equity/day/week at init
@@ -430,8 +441,9 @@ int OnInit()
    g_ui.Init(g_cfg.dashboard_enabled, "v0.12.0");
 
    g_init_ok = true;
-   g_log.Info("INIT", StringFormat("initialization complete (all engines live; safety gate active; news filter %s)",
-              g_news.Enabled() ? "ENABLED" : "DISABLED (no calendar — fail-safe clear)"));
+   g_log.Info("INIT", StringFormat("initialization complete (all engines live; safety gate active; news filter %s; research CSV %s)",
+              g_news.Enabled() ? "ENABLED" : "DISABLED (no calendar — fail-safe clear)",
+              g_res.Ready() ? "ON" : "OFF"));
    return INIT_SUCCEEDED;
   }
 
@@ -1024,6 +1036,8 @@ void CheckPositionClosed(const SXareSymbolProps &props)
                     rec.session, rec.pl_money, rec.r_multiple,
                     rec.bars_in_trade, rec.slippage_points, rec.open_reason);
    g_risk.OnTradeClosed(rec.pl_money, rec.close_time);
+   g_perf.OnTradeClosed(rec.r_multiple, rec.pl_money);   // §17/§39 stats
+   g_perf.LogSnapshot(&g_log);
   }
 
 //+------------------------------------------------------------------+
@@ -1056,7 +1070,9 @@ void ProcessBar()
    ENUM_XARE_TF_LABEL exec_label = XARE_TF_NEUTRAL;
    if(f.ema_fast > f.ema_mid && bar.close > f.ema_mid)      exec_label = XARE_TF_BULL;
    else if(f.ema_fast < f.ema_mid && bar.close < f.ema_mid) exec_label = XARE_TF_BEAR;
-   SXareMTF mtf;
+   SXareMTF mtf;                       // explicit init: Evaluate may not write
+   mtf.valid=false; mtf.alignment=XARE_ALIGN_NEUTRAL; mtf.h4=XARE_TF_NEUTRAL;
+   mtf.h1=XARE_TF_NEUTRAL; mtf.exec=XARE_TF_NEUTRAL; mtf.evidence=""; mtf.evaluated_at=0;
    bool mtf_ok = g_mtf.Evaluate(1, exec_label, mtf);
 
    int spread = g_md.CurrentSpreadPoints();
@@ -1080,22 +1096,36 @@ void ProcessBar()
                   mtf.evidence));
 
    // --- M4: regime classification
-   SXareRegime regime;
+   SXareRegime regime;               // explicit init: Evaluate may not write
+   regime.valid=false; regime.regime=XARE_REGIME_UNKNOWN; regime.confidence=0;
+   regime.evidence=""; regime.evaluated_at=0;
    if(g_regime.Evaluate(1, f, bar, regime) && regime.valid)
       g_log.Info("REGIME", StringFormat("%s conf=%d | %s",
                   XareRegimeToString(regime.regime), regime.confidence, regime.evidence));
 
    // --- M5: market structure
    SXareStructure structure;
+   structure.valid=false; structure.trend=XARE_STRUCT_NEUTRAL;
+   structure.last_swing_high=0; structure.prev_swing_high=0;
+   structure.last_swing_low=0; structure.prev_swing_low=0;
+   structure.bos_bull=false; structure.bos_bear=false; structure.choch=false;
+   structure.zone_count_res=0; structure.zone_count_sup=0;
+   structure.evidence=""; structure.evaluated_at=0;
+   for(int zi=0; zi<4; zi++){ structure.resistance[zi]=0; structure.support[zi]=0; }
    if(g_struct.Evaluate(1, structure) && structure.valid)
       g_log.Info("STRUCT", structure.evidence);
 
    // --- M6: session then liquidity (liquidity consumes session H/L)
    SXareSession session;
+   session.valid=false; session.session=XARE_SESS_OFF; session.minute_of_day=0;
+   session.high=0; session.low=0; session.range=0; session.episode_bars=0;
+   session.evidence=""; session.evaluated_at=0;
    if(g_sess.Evaluate(1, session) && session.valid)
       g_log.Info("SESSION", session.evidence);
 
    SXareLiquidity liq;
+   liq.valid=false; liq.sweep_up=false; liq.sweep_down=false; liq.swept_level=0;
+   liq.level_name=""; liq.penetration_atr=0; liq.evidence=""; liq.evaluated_at=0;
    if(g_liq.Evaluate(1, session, f.atr, liq) && liq.valid)
       g_log.Info("LIQ", liq.evidence);
 
@@ -1194,8 +1224,13 @@ void ProcessBar()
       if(plan.actionable)
         {
          // --- M12: safety gate, then send (trading modes only) -----------
-         bool sent = TrySendPlan(plan, f.bar_time, props,
-                                 XareRegimeToString(regime.regime));
+         // --- M13: expectancy gate (§17) abstains until sample is ready --
+         bool sent = false;
+         if(!g_perf.ExpectancyAllows(0))
+            g_log.Warn("PERF", "measured expectancy clearly negative — send suppressed (§17)");
+         else
+            sent = TrySendPlan(plan, f.bar_time, props,
+                               XareRegimeToString(regime.regime));
          if(!sent)
             g_log.Info("PLAN", StringFormat(
                "%s vol=%.2f entry=%s SL=%s (%.0fpt) TP=%s (%.0fpt) R=%.2f risk=%.2f%% ($%.2f) | not sent (mode/gate)",
@@ -1216,6 +1251,19 @@ void ProcessBar()
       g_log.Info("DECISION", StringFormat(
          "NO_TRADE (%s) | %s",
          XareNoTradeToString(decision.nt_reason), decision.evidence));
+     }
+
+   // --- M13: research row for this closed bar (features only, §37) ------
+   if(g_res.Ready())
+     {
+      SXareRiskSnapshot rr = g_risk.Snapshot();
+      ENUM_XARE_SCORE_BAND rb = have_score
+         ? XareScoreBand(score.total, g_cfg.score_min, g_cfg.score_candidate,
+                         g_cfg.score_trade, g_cfg.score_strong)
+         : XARE_BAND_NONE;
+      g_res.Row(bar, f, atr_pct, regime, mtf, structure, session, liq,
+                decision, score, rb, rr, spread,
+                PeriodSeconds(_Period) / 60);
      }
   }
 
