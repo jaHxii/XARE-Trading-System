@@ -35,6 +35,14 @@ struct SXareSymbolProps
    bool             valid;          // false ⇒ sizing must refuse to trade
   };
 
+//--- per-timeframe trend label (M3): simple, objective EMA-structure rule
+enum ENUM_XARE_TF_LABEL
+  {
+   XARE_TF_NEUTRAL = 0,
+   XARE_TF_BULL,
+   XARE_TF_BEAR
+  };
+
 //--- feature snapshot for one closed bar (spec §7). Indicators are FEATURES.
 struct SXareFeatures
   {
@@ -82,6 +90,18 @@ enum ENUM_XARE_ALIGNMENT
    XARE_ALIGN_BULLISH,
    XARE_ALIGN_BEARISH,
    XARE_ALIGN_MIXED          // conflicting TFs — never forced into a trade
+  };
+
+//--- multi-timeframe context verdict (spec §8)
+struct SXareMTF
+  {
+   bool             valid;          // all TF reads succeeded
+   ENUM_XARE_ALIGNMENT alignment;
+   ENUM_XARE_TF_LABEL h4;           // macro
+   ENUM_XARE_TF_LABEL h1;           // intermediate
+   ENUM_XARE_TF_LABEL exec;         // execution TF (= chart TF, e.g. M15)
+   string           evidence;
+   datetime         evaluated_at;
   };
 
 //--- setup types (spec §15)

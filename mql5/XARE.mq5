@@ -24,6 +24,7 @@
 #include <XARE\Diagnostics.mqh>
 #include <XARE\MarketData.mqh>
 #include <XARE\Indicators.mqh>
+#include <XARE\MultiTimeframe.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -57,6 +58,7 @@ CXareLogger       g_log;
 CXareDiagnostics  g_ui;
 CXareMarketData   g_md;
 CXareIndicators   g_ind;
+CXareMultiTimeframe g_mtf;
 
 //--- runtime state
 string            g_symbol;
@@ -224,10 +226,16 @@ int OnInit()
       g_log.Error("INIT", "indicator engine failed to initialize");
       return INIT_FAILED;
      }
+   if(!g_mtf.Init(g_symbol, _Period, g_cfg, &g_log))
+     {
+      g_log.Error("INIT", "multi-timeframe engine failed to initialize");
+      g_ind.Release();
+      return INIT_FAILED;
+     }
    SXareSymbolProps props;
    g_md.GetProps(props);
-   g_log.Info("INIT", StringFormat("engines ready | props.valid=%s min_history=%d",
-              props.valid ? "true" : "false", g_cfg.history_bars_min));
+   g_log.Info("INIT", StringFormat("engines ready | props.valid=%s min_history=%d mtf=H4+H1+%s",
+              props.valid ? "true" : "false", g_cfg.history_bars_min, g_tf_label));
 
    // 6) dashboard
    g_ui.Init(g_cfg.dashboard_enabled, "v0.2.0");
@@ -241,6 +249,7 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    g_log.Info("INIT", StringFormat("deinit reason=%d", reason));
+   g_mtf.Release();          // MTF EMA handles (§64)
    g_ind.Release();          // indicator handles (§64)
    g_ui.Deinit();
    g_log.Deinit();
@@ -270,6 +279,16 @@ void RunSelfTest()
    if(MathAbs(XareRateOfChange(110.0, 100.0) - 10.0) > 1e-9)  { failed++; Print("SELFTEST FAIL T3 roc up"); }
    if(MathAbs(XareRateOfChange(90.0, 100.0) - (-10.0)) > 1e-9){ failed++; Print("SELFTEST FAIL T3 roc down"); }
    if(XareRateOfChange(100.0, 0.0) != 0.0)                    { failed++; Print("SELFTEST FAIL T3 roc zero-div"); }
+
+   // T5 (M3): MTF alignment classifier — mixed info must never force a side
+   if(CXareMultiTimeframe::ClassifyStatic(XARE_TF_BULL,XARE_TF_BULL,XARE_TF_BULL)
+      != XARE_ALIGN_BULLISH) { failed++; Print("SELFTEST FAIL T5 bull align"); }
+   if(CXareMultiTimeframe::ClassifyStatic(XARE_TF_BEAR,XARE_TF_BEAR,XARE_TF_BEAR)
+      != XARE_ALIGN_BEARISH) { failed++; Print("SELFTEST FAIL T5 bear align"); }
+   if(CXareMultiTimeframe::ClassifyStatic(XARE_TF_BULL,XARE_TF_BEAR,XARE_TF_BULL)
+      != XARE_ALIGN_MIXED)   { failed++; Print("SELFTEST FAIL T5 mixed align"); }
+   if(CXareMultiTimeframe::ClassifyStatic(XARE_TF_BULL,XARE_TF_NEUTRAL,XARE_TF_BULL)
+      != XARE_ALIGN_NEUTRAL) { failed++; Print("SELFTEST FAIL T5 neutral align"); }
 
    // T4 (M2): price normalization math vs tick-size grid (same formula as
    // CXareMarketData::NormalizePrice, on synthetic values)
@@ -322,6 +341,13 @@ void ProcessBar()
    g_features_warned = false;
    g_last_processed_bar = f.bar_time;
 
+   // --- M3: execution-TF label from the same EMA rule, then MTF alignment
+   ENUM_XARE_TF_LABEL exec_label = XARE_TF_NEUTRAL;
+   if(f.ema_fast > f.ema_mid && bar.close > f.ema_mid)      exec_label = XARE_TF_BULL;
+   else if(f.ema_fast < f.ema_mid && bar.close < f.ema_mid) exec_label = XARE_TF_BEAR;
+   SXareMTF mtf;
+   bool mtf_ok = g_mtf.Evaluate(1, exec_label, mtf);
+
    int spread = g_md.CurrentSpreadPoints();
    SXareSymbolProps props;
    g_md.GetProps(props);
@@ -335,6 +361,12 @@ void ProcessBar()
       DoubleToString(f.ema_slow, dg),
       f.rsi, f.roc, f.adx, f.di_plus, f.di_minus,
       DoubleToString(f.atr, dg), spread));
+   if(mtf_ok)
+      g_log.Debug("MTF", StringFormat("alignment=%s (%s)",
+                  mtf.alignment==XARE_ALIGN_BULLISH ? "BULLISH" :
+                  mtf.alignment==XARE_ALIGN_BEARISH ? "BEARISH" :
+                  mtf.alignment==XARE_ALIGN_MIXED   ? "MIXED"   : "NEUTRAL",
+                  mtf.evidence));
   }
 
 //+------------------------------------------------------------------+

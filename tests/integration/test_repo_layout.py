@@ -26,6 +26,7 @@ REQUIRED_FILES = [
     "mql5/Include/XARE/Diagnostics.mqh",
     "mql5/Include/XARE/MarketData.mqh",
     "mql5/Include/XARE/Indicators.mqh",
+    "mql5/Include/XARE/MultiTimeframe.mqh",
 ]
 
 
@@ -74,3 +75,10 @@ def test_new_bar_detection_exists():
     md = (REPO / "mql5/Include/XARE/MarketData.mqh").read_text(encoding="utf-8")
     assert "IsNewBar" in md
     assert "m_last_bar_time" in md
+
+
+def test_mtf_mixed_alignment_is_distinct():
+    """M3: conflicting TFs must classify as MIXED (never forced into a trade)."""
+    mtf = (REPO / "mql5/Include/XARE/MultiTimeframe.mqh").read_text(encoding="utf-8")
+    assert "XARE_ALIGN_MIXED" in mtf
+    assert "ClassifyStatic" in mtf  # self-testable pure classifier

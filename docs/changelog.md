@@ -4,6 +4,24 @@ All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).
 
+## [v0.3.0] — 2026-09-15 (M3)
+
+### Added
+- `MultiTimeframe.mqh`: per-TF context (H4 macro, H1 intermediate) with two
+  cached EMA handles each; objective label rule BULL/BEAR/NEUTRAL; alignment
+  classifier producing BULLISH / BEARISH / MIXED / NEUTRAL with evidence
+  string; execution-TF label derived from the shared EMA rule on the chart TF.
+- SELF_TEST group T5: alignment classifier cases incl. mixed-information
+  behavior (H4 bull + H1 bear + M15 bull ⇒ MIXED, never a forced side).
+
+### Fixed
+- Types.mqh ordering: `SXareMTF` was declared before its enum dependencies
+  (caught by compiler as error 149/154) — declaration order matters in MQL5.
+- `->` is not an MQL5 operator; object pointers use `.` (error 223/237).
+
+### Verified
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_m3.log`).
+
 ## [v0.2.0] — 2026-09-15 (M2)
 
 ### Added
