@@ -11,27 +11,46 @@ ALL_SOURCES = [MQL5 / "XARE.mq5"] + sorted((MQL5 / "Include" / "XARE").glob("*.m
 
 
 def test_no_order_sending_apis():
-    """Spec 63/§11: M1 must never place, modify, or close orders."""
+    """Order APIs live ONLY in the dedicated execution layer (spec §29).
+
+    M1 invariant was 'no order APIs anywhere'. From M10 the invariant is:
+    OrderSend may appear in ExecutionEngine.mqh only; CTrade-style wrappers
+    and one-liner Buy(/Sell( helpers are forbidden everywhere (the EA uses
+    raw MqlTradeRequest with explicit validation, never blind convenience
+    sends).
+    """
+    import re
     forbidden = [
-        "OrderSend",
-        "CTrade",
-        "PositionClose",
-        "PositionModify",
-        "PositionOpen",
-        "Buy(",
-        "Sell(",
+        r"\bCTrade\b",
+        r"\bPositionOpen\b",
+        r"\bPositionClose\b",    # word boundary: not CheckPositionClosed
+        r"\bPositionModify\b",
+        r"\.Buy\(",
+        r"\.Sell\(",
     ]
     for src in ALL_SOURCES:
         text = src.read_text(encoding="utf-8")
         for token in forbidden:
-            assert token not in text, f"{src.name} contains trade API '{token}'"
+            assert not re.search(token, text), \
+                f"{src.name} contains trade API /{token}/"
+
+
+def test_ordersend_confined_to_execution_layer():
+    """OrderSend exists only inside ExecutionEngine.mqh (single choke point)."""
+    for src in ALL_SOURCES:
+        text = src.read_text(encoding="utf-8")
+        if src.name == "ExecutionEngine.mqh":
+            assert "OrderSend" in text, "execution layer lost its send path"
+        else:
+            assert "OrderSend" not in text, \
+                f"{src.name} must not send orders directly (use ExecutionEngine)"
 
 
 def test_ordercalcmargin_is_readonly_probe():
-    """The only order-related call allowed in M1 is the read-only margin probe."""
+    """Margin queries are read-only; they must never send anything."""
     ea = (MQL5 / "XARE.mq5").read_text(encoding="utf-8")
     assert "OrderCalcMargin" in ea  # probe present
-    assert "OrderSend" not in ea    # but never an actual send
+    assert "OrderSend" not in ea    # EA itself never sends — execution layer does
 
 
 def test_no_hardcoded_symbol():

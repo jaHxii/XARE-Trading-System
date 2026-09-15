@@ -102,6 +102,16 @@ struct SXareConfig
    double           max_margin_pct;          // refuse if margin > this % of free
    bool             allow_min_lot_override;  // §49 high-risk override; default OFF
 
+   // Position management (§22/§23). Triggers in R of the actual SL distance.
+   double           be_trigger_r;       // move SL to BE at this R
+   double           be_lock_points;     // BE lock beyond entry (points)
+   double           trail_trigger_r;    // start trailing at this R
+   double           trail_atr_mult;     // trail distance = ATR × this
+   double           partial_trigger_r;  // take partial at this R
+   double           partial_close_pct;  // % of volume closed at partial
+   int              max_bars_in_trade;  // §23: hard bar-based exit
+   int              max_hold_minutes;   // §23: minute-based exit (0 = off)
+
    // Scoring (§16). Weights are INITIAL HYPOTHESES (sum 100), docs/parameters.md.
    double           w_trend;             // 20
    double           w_mtf;               // 15
@@ -211,6 +221,16 @@ void XareConfigDefaults(SXareConfig &c)
    c.emergency_max_lot_x1000 = 500;    // 0.50 lots hard cap
    c.max_margin_pct          = 50.0;   // refuse if required margin > 50% of free
    c.allow_min_lot_override  = false;  // §49: default SAFE
+
+   // Position management: conservative hypotheses (docs/parameters.md)
+   c.be_trigger_r            = 1.0;    // BE after 1R of favorable movement
+   c.be_lock_points          = 50;     // lock $0.50/oz-equivalent beyond entry
+   c.trail_trigger_r         = 1.0;
+   c.trail_atr_mult          = 2.0;
+   c.partial_trigger_r       = 1.5;
+   c.partial_close_pct       = 50.0;
+   c.max_bars_in_trade       = 48;     // 12h on M15 — no indefinite holds (§23)
+   c.max_hold_minutes        = 0;      // minutes-based exit disabled by default
 
    // Scoring weights + bands: hypotheses (docs/parameters.md)
    c.w_trend                 = 20.0;

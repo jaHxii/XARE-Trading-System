@@ -4,6 +4,50 @@ All notable changes to XARE. Format based on Keep a Changelog; versioning is
 semantic (v0.x = research platform, v1.0.0 = production candidate, which
 requires the full acceptance battery in `docs/testing.md`).
 
+## [v0.12.0] — 2026-09-15 (M10–M12)
+
+### Added
+- `ExecutionEngine.mqh`: pure plan builder (`XareBuildTradePlan` — band
+  gate, position/trade caps, SL from the LIVE entry, tick-grid-safe
+  SL/TP, sizing, margin budget) + the live send layer (§29 validation
+  chain, broker filling-mode query, deviation guard, duplicate-order
+  protection per bar and per open position, fill/slippage recording,
+  `ApplyManagement` with a tighten-only last line of defense).
+- `PositionManager.mqh`: position state machine (§30) — poll by magic,
+  close detection via history deals, exit classification (HARD_SL/TP by
+  price, R multiple from the actual stop distance), duplicate guard.
+- `ExitEngine.mqh`: pure management decisions (§22/§23) — break-even
+  (with lock), ATR trailing (ratchet-only), one-shot partial, hard time
+  exit (bars/minutes), regime-flip exit, signal-reversal exit; priority
+  ordered, every order explainable.
+- `SafetyEngine.mqh`: ONE GO/BLOCK gate (§33) with documented priority
+  (emergency → switch → halt → daily → weekly → cooldown → exec-fail →
+  data → quotes → symbol → equity → news → spread → margin) and the
+  §51 emergency latch (sticky, first reason wins).
+- `NewsFilter.mqh`: optional HIGH-impact calendar CSV in MQL5\Common;
+  blackouts only when data exists, fail-safe clear when not (§14).
+- EA: full order flow armed behind the gate — `TrySendPlan` (context
+  assembly + send), `ManagePosition`, `CheckPositionClosed` (journal row
+  + loss-streak feed), emergency triggers (cap breach, 5+ execution
+  failures, volume-ceiling breach), daily-limit close (default off).
+- SELF_TEST T14 (plan builder: 7 verified fixtures) and T15 (gate
+  priority, emergency latch, news windows).
+- Python mirrors: `test_execution_plan.py` (14),
+  `test_exit_engine_contract.py` (15), `test_safety_contract.py` (16).
+
+### Fixed
+- Invented `POSITION_VOLUME_INITIAL` property caught by the compiler —
+  replaced with tracked-context volume comparison (anti-hallucination).
+- T14 fixtures had wrong expected math (would have failed in the tester
+  despite compiling); rewritten with verified arithmetic.
+- Trade-path guards refined: `OrderSend` confined to ExecutionEngine.mqh;
+  word-boundary regex so `CheckPositionClosed` is not a false positive.
+
+### Verified
+- Compile: **0 errors, 0 warnings** (`reports/output/compile_m12.log`).
+- Python suite: 109 passed. Trading still requires DEMO/PRODUCTION/BACKTEST
+  mode AND the explicit switch; default install cannot trade.
+
 ## [v0.9.0] — 2026-09-15 (M9)
 
 ### Added

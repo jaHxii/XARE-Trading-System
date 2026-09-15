@@ -8,7 +8,13 @@
 //| (0–100 weighted breakdown) are wired.                            |
 //| M9 risk engine: dynamic sizing from broker properties, daily/    |
 //| weekly loss limits, drawdown states, streak cooldown.            |
-//| STILL no orders — execution arrives in M10 behind safety gates.  |
+//| M10 execution: fully priced trade PLAN per signal bar (pure      |
+//| builder + §29 validation chain). M11 position state machine +    |
+//| management decisions (BE/trail/partial/time/regime/reversal).    |
+//| M12 safety gate: ONE GO/BLOCK choke point; emergency latch.      |
+//| Orders flow ONLY through: safety gate -> execution engine.       |
+//| Trading modes (DEMO/PRODUCTION/BACKTEST) require the explicit    |
+//| trading switch; default mode never sends.                        |
 //| Modes (default SIGNAL_ONLY — never default to trading):          |
 //|   RESEARCH  : future home of feature CSV export                  |
 //|   SIGNAL_ONLY: evaluate + report, never place orders             |
@@ -21,7 +27,7 @@
 #property link        "https://github.com/jaHxii/XARE-Trading-System"
 #property version     "1.00"  // display-only: this compiler rejects 0.x majors (warning 68).
                                      // Authoritative version: v0.1.0 — see docs/changelog.md + git tag.  // x.yy format required by MetaEditor; semver v0.1.0 in changelog/tag
-#property description "XARE — XAUUSD Adaptive Risk Engine (research build, M9)"
+#property description "XARE — XAUUSD Adaptive Risk Engine (research build, M12)"
 
 #include <XARE\Types.mqh>
 #include <XARE\Config.mqh>
@@ -37,6 +43,11 @@
 #include <XARE\SignalEngine.mqh>
 #include <XARE\ScoreEngine.mqh>
 #include <XARE\RiskEngine.mqh>
+#include <XARE\ExecutionEngine.mqh>
+#include <XARE\PositionManager.mqh>
+#include <XARE\ExitEngine.mqh>
+#include <XARE\SafetyEngine.mqh>
+#include <XARE\NewsFilter.mqh>
 
 //--- inputs: single source of truth is SXareConfig; inputs feed it once.
 input group  "General"
@@ -105,6 +116,10 @@ input double         InpTPRMultiple     = 2.0;                   // TP: R multip
 input double         InpEmergMaxLot     = 0.50;                  // Emergency max lot (hard cap)
 input double         InpMaxMarginPct    = 50.0;                  // Max margin (% of free)
 
+input group  "Safety (v0.12: fail-safe defaults)"
+input int            InpNewsBeforeMin   = 30;                    // News blackout before HIGH event (min)
+input int            InpNewsAfterMin    = 30;                    // News blackout after HIGH event (min)
+
 input group  "Logging"
 input int            InpLogLevel        = 1;                     // 0=DEBUG 1=INFO 2=WARN 3=ERROR
 input bool           InpJournalCSV      = true;                  // Enable trade journal CSV
@@ -123,6 +138,11 @@ CXareLiquidityEngine g_liq;
 CXareSignalEngine   g_sig;
 CXareScoreEngine    g_score;
 CXareRiskEngine     g_risk;
+CXareExecutionEngine g_exec;
+CXarePositionManager g_pos;
+CXareExitEngine     g_exit;
+CXareSafetyEngine   g_safety;
+CXareNewsFilter     g_news;
 
 //--- last bar decision (for dashboard; signal-only — nothing is executed)
 SXareDecision     g_last_decision;
@@ -131,6 +151,9 @@ bool              g_have_decision = false;
 bool              g_have_score    = false;
 SXareRegime       g_last_regime;
 bool              g_have_regime   = false;
+SXareTradeDecision g_last_plan;     // fully priced plan (M10; not sent here)
+bool              g_have_plan     = false;
+bool              g_emergency_ref = false;   // mirror of the safety latch
 
 //--- runtime state
 string            g_symbol;
@@ -323,7 +346,7 @@ int OnInit()
       default:         g_tf_label=EnumToString(_Period);
      }
 
-   g_log.Info("INIT", StringFormat("XARE v0.9.0 starting | mode=%s trading=%s symbol=%s tf=%s",
+   g_log.Info("INIT", StringFormat("XARE v0.12.0 starting | mode=%s trading=%s symbol=%s tf=%s",
               XareModeToString(g_cfg.mode),
               g_cfg.trading_enabled?"ON":"OFF", g_symbol, g_tf_label));
 
@@ -386,6 +409,11 @@ int OnInit()
 
    g_sig.Init(g_cfg);   // pure engine; cannot fail
    g_score.Init(g_cfg); // pure engine; cannot fail
+   g_exec.Init(g_cfg);  // execution layer (send path armed for M11+)
+   g_pos.Init(g_cfg.magic, &g_log);   // position state machine
+   g_exit.Init(g_cfg);  // pure management decisions
+   g_safety.Init();     // gatekeeper + emergency latch
+   g_news.Init(InpNewsBeforeMin, InpNewsAfterMin);  // §14 fail-safe filter
    SXareSymbolProps props;
    g_md.GetProps(props);
    g_risk.Init(g_cfg, props);   // anchors equity/day/week at init
@@ -399,10 +427,11 @@ int OnInit()
               props.valid ? "true" : "false", g_cfg.history_bars_min, g_tf_label));
 
    // 6) dashboard
-   g_ui.Init(g_cfg.dashboard_enabled, "v0.9.0");
+   g_ui.Init(g_cfg.dashboard_enabled, "v0.12.0");
 
    g_init_ok = true;
-   g_log.Info("INIT", "initialization complete (M2-M6 context, M7/M8 signals/score, M9 risk; no orders yet)");
+   g_log.Info("INIT", StringFormat("initialization complete (all engines live; safety gate active; news filter %s)",
+              g_news.Enabled() ? "ENABLED" : "DISABLED (no calendar — fail-safe clear)"));
    return INIT_SUCCEEDED;
   }
 
@@ -642,6 +671,125 @@ void RunSelfTest()
    if(XareCooldownUntil(D'2026.01.05 10:00', 4, 900) != (datetime)(D'2026.01.05 10:00' + 4*900))
       { failed++; Print("SELFTEST FAIL T13 cooldown"); }
 
+   // T14 (M10): pure trade-plan builder — band gate, caps, SL/TP, sizing, --
+   // margin budget on synthetic props; no terminal state touched.
+   // Fixture math (verified): entry=ask=2000.00, spread 1.00px=100pt.
+   // swing_low 1999 => structure 1.00px; ATR 4 x 1.5 = 6.00px wins hybrid.
+   // SL dist 6.00px = 600pt; loss/lot = 600 x $1 = $600.
+   SXareDecision pd; pd.has_signal=true; pd.direction=1;
+                     pd.setup=XARE_SETUP_TREND_PULLBACK; pd.setup_confidence=90;
+                     pd.entry_lo=2000; pd.entry_hi=2010; pd.bar_time=0;
+                     pd.invalidation="x"; pd.evidence="t"; pd.nt_reason=XARE_NT_NONE;
+   SXareSymbolProps pp; pp.symbol="TEST"; pp.digits=2; pp.point=0.01;
+                      pp.tick_size=0.01; pp.tick_value=1.0; pp.contract_size=100.0;
+                      pp.volume_min=0.01; pp.volume_max=100.0; pp.volume_step=0.01;
+                      pp.stops_level=0; pp.freeze_level=0; pp.trade_mode=4; pp.valid=true;
+   SXareConfig pc; XareConfigDefaults(pc);
+   SXareTradeDecision pl;
+
+   // full pass: score 84 (TRADE band), equity 10000 @ 0.5% = $50 risk,
+   // raw volume 50/600 = 0.0833 -> snapped DOWN to 0.08
+   XareBuildTradePlan(pd, 84.0, 1999.0, 2000.0, pp, pc, XARE_RISK_NORMAL, 0.5,
+                      4.0, 1999.0, 2050.0, 0, 0, 10000.0, 10000.0, 0.0, pl);
+   if(!pl.actionable || pl.direction != 1 ||
+      MathAbs(pl.volume - 0.08) > 1e-9 ||
+      MathAbs(pl.sl_price - 1994.0) > 1e-9 ||        // 2000 - 6.00
+      MathAbs(pl.tp_price - 2012.0) > 1e-9 ||        // +2R = +12.00
+      MathAbs(pl.planned_r - 2.0) > 1e-9 ||
+      MathAbs(pl.risk_money - 50.0) > 1e-9)
+      { failed++; Print("SELFTEST FAIL T14 plan-basic"); }
+
+   // band gate: score 65 (CANDIDATE) must not produce a plan
+   XareBuildTradePlan(pd, 65.0, 1999.0, 2000.0, pp, pc, XARE_RISK_NORMAL, 0.5,
+                      4.0, 1999.0, 2050.0, 0, 0, 10000.0, 10000.0, 0.0, pl);
+   if(pl.actionable || pl.block_reason != XARE_BR_NO_TRADE_BAND)
+      { failed++; Print("SELFTEST FAIL T14 band-gate"); }
+
+   // position cap: 1 open position with cap 1 must block
+   XareBuildTradePlan(pd, 84.0, 1999.0, 2000.0, pp, pc, XARE_RISK_NORMAL, 0.5,
+                      4.0, 1999.0, 2050.0, 1, 0, 10000.0, 10000.0, 0.0, pl);
+   if(pl.actionable || pl.block_reason != XARE_BR_MAX_POSITIONS)
+      { failed++; Print("SELFTEST FAIL T14 position-cap"); }
+
+   // HALTED risk state: zero effective risk must block with reason
+   XareBuildTradePlan(pd, 84.0, 1999.0, 2000.0, pp, pc, XARE_RISK_HALTED, 0.0,
+                      4.0, 1999.0, 2050.0, 0, 0, 10000.0, 10000.0, 0.0, pl);
+   if(pl.actionable || pl.block_reason != XARE_BR_DRAWDOWN_STATE)
+      { failed++; Print("SELFTEST FAIL T14 halted-block"); }
+
+   // below-min volume: $50 account @ 0.05% = $0.025 risk -> raw 0.00004
+   // -> snaps to 0 -> SKIP, never pad up to minimum (§49)
+   XareBuildTradePlan(pd, 84.0, 1999.0, 2000.0, pp, pc, XARE_RISK_NORMAL, 0.05,
+                      4.0, 1999.0, 2050.0, 0, 0, 50.0, 50.0, 0.0, pl);
+   if(pl.actionable || pl.block_reason != XARE_BR_VOLUME)
+      { failed++; Print("SELFTEST FAIL T14 small-account-skip"); }
+
+   // margin budget: $7000/lot x 0.08 = $560 > 50% of free 1000 = 500 -> block
+   XareBuildTradePlan(pd, 84.0, 1999.0, 2000.0, pp, pc, XARE_RISK_NORMAL, 0.5,
+                      4.0, 1999.0, 2050.0, 0, 0, 10000.0, 1000.0, 7000.0, pl);
+   if(pl.actionable || pl.block_reason != XARE_BR_MARGIN)
+      { failed++; Print("SELFTEST FAIL T14 margin-budget"); }
+
+   // SL floor: stops_level 100 => min_dist = 1.00px + spread 1.00px = 2.00px;
+   // ATR 0.1 x 1.5 = 0.15px and structure 1.00px are both below -> dist 2.00px
+   SXareSymbolProps pps = pp; pps.stops_level = 100;
+   XareBuildTradePlan(pd, 84.0, 1999.0, 2000.0, pps, pc, XARE_RISK_NORMAL, 0.5,
+                      0.1, 1999.0, 2050.0, 0, 0, 10000.0, 10000.0, 0.0, pl);
+   if(!pl.actionable || pl.sl_points < 200.0)
+      { failed++; Print("SELFTEST FAIL T14 stops-floor"); }
+
+   // T15 (M12): emergency latch + safety gate priority + news window ----
+   CXareSafetyEngine saf;
+   ENUM_XARE_BLOCK_REASON br15; string bd15;
+   SXareSafetyContext sc15;
+   sc15.trading_enabled=true; sc15.emergency=false; sc15.halted=false;
+   sc15.daily_breach=false; sc15.weekly_breach=false; sc15.cooldown_active=false;
+   sc15.exec_fail_streak=false; sc15.spread_points=150; sc15.max_spread_points=350;
+   sc15.abnormal_spread_points=600; sc15.news_clear=true; sc15.news_reason="";
+   sc15.quotes_ok=true; sc15.data_ok=true; sc15.symbol_trade_full=true;
+   sc15.equity=1000; sc15.margin_ok=true;
+
+   // all clear => GO
+   if(!saf.Go(sc15, br15, bd15) || br15 != XARE_BR_NONE)
+      { failed++; Print("SELFTEST FAIL T15 go"); }
+
+   // emergency outranks everything (§51) — even with every other check green
+   saf.ArmEmergency("test emergency");
+   if(saf.Go(sc15, br15, bd15) || br15 != XARE_BR_EMERGENCY)
+      { failed++; Print("SELFTEST FAIL T15 emergency-priority"); }
+   if(!saf.Emergency() || saf.EmergencyReason() != "test emergency")
+      { failed++; Print("SELFTEST FAIL T15 emergency-latch"); }
+
+   // gate priority: trading-off beats halted beats daily loss
+   CXareSafetyEngine saf2;
+   sc15.trading_enabled=false; sc15.halted=true; sc15.daily_breach=true;
+   if(saf2.Go(sc15, br15, bd15) || br15 != XARE_BR_TRADING_OFF)
+      { failed++; Print("SELFTEST FAIL T15 priority-trading-off"); }
+   sc15.trading_enabled=true;
+   if(saf2.Go(sc15, br15, bd15) || br15 != XARE_BR_RISK_HALTED)
+      { failed++; Print("SELFTEST FAIL T15 priority-halted"); }
+   sc15.halted=false;
+   if(saf2.Go(sc15, br15, bd15) || br15 != XARE_BR_DAILY_LOSS)
+      { failed++; Print("SELFTEST FAIL T15 priority-daily"); }
+
+   // spread gates (§28): entry limit and abnormal condition
+   sc15.daily_breach=false;
+   sc15.spread_points=400;
+   if(saf2.Go(sc15, br15, bd15) || br15 != XARE_BR_SPREAD)
+      { failed++; Print("SELFTEST FAIL T15 spread-limit"); }
+   sc15.spread_points=700;
+   if(saf2.Go(sc15, br15, bd15) || br15 != XARE_BR_SPREAD_ABNORMAL)
+      { failed++; Print("SELFTEST FAIL T15 spread-abnormal"); }
+
+   // news blackout math (§14): inclusive window edges
+   datetime ev = D'2026.01.05 15:30';
+   if(!XareInBlackout(ev - 30*60, ev, 30, 30) ||
+      !XareInBlackout(ev + 30*60, ev, 30, 30) ||
+      XareInBlackout(ev - 31*60, ev, 30, 30) ||
+      XareInBlackout(ev + 31*60, ev, 30, 30) ||
+      XareInBlackout(ev, 0, 30, 30))
+      { failed++; Print("SELFTEST FAIL T15 news-window"); }
+
    // T7 (M5): pivot confirmation math — a pivot needs lookback + confirm bars
    if(CXareStructureEngine::MinBarsForPivot(3, 2) != 5)
       { failed++; Print("SELFTEST FAIL T7 pivot math"); }
@@ -718,7 +866,7 @@ void RunSelfTest()
    if(scT.Score(d12d, ft, mt, stp, lq, XARE_SESS_LONDON, 50.0, s12d))
       { failed++; Print("SELFTEST FAIL T12 no-signal-not-scored"); }
 
-   if(failed==0) Print("XARE SELF-TEST: PASS (13 groups)");
+   if(failed==0) Print("XARE SELF-TEST: PASS (15 groups)");
    else          Print("XARE SELF-TEST: FAIL (", failed, " checks)");
   }
 
@@ -738,6 +886,146 @@ void Heartbeat()
 //+------------------------------------------------------------------+
 //| M2 per-bar pipeline: new bar -> closed-bar features -> log.      |
 //| No trading, no orders — evaluation only.                         |
+//+------------------------------------------------------------------+
+//| M12: which modes may send orders. SIGNAL_ONLY/RESEARCH/SELF_TEST |
+//| never send regardless of the trading switch (spec §1/§36/§63).   |
+//+------------------------------------------------------------------+
+bool ModeAllowsTrading()
+  {
+   if(!g_cfg.trading_enabled)
+      return false;
+   return (g_cfg.mode == XARE_MODE_DEMO ||
+           g_cfg.mode == XARE_MODE_PRODUCTION ||
+           g_cfg.mode == XARE_MODE_BACKTEST);
+  }
+
+//+------------------------------------------------------------------+
+//| M12: assemble the live safety context and gate the send (§33).   |
+//| Returns true only when an order actually went out.               |
+//+------------------------------------------------------------------+
+bool TrySendPlan(const SXareTradeDecision &plan, const datetime bar_time,
+                 const SXareSymbolProps &props, const string regime_label)
+  {
+   if(!plan.actionable)
+      return false;
+   if(!ModeAllowsTrading())
+      return false;              // signal-only: PLAN line already reported it
+
+   SXareSafetyContext sc;
+   sc.trading_enabled   = ModeAllowsTrading();
+   sc.emergency         = g_safety.Emergency();
+   SXareRiskSnapshot rs = g_risk.Snapshot();
+   sc.halted            = (rs.state == XARE_RISK_HALTED);
+   sc.daily_breach      = g_risk.DailyLossBreached();
+   sc.weekly_breach     = g_risk.WeeklyLossBreached();
+   sc.cooldown_active   = rs.cooldown_active;
+   sc.exec_fail_streak  = (g_exec.ConsecutiveFailures() >= 3);
+   sc.spread_points     = g_md.CurrentSpreadPoints();
+   sc.max_spread_points = g_cfg.max_spread_points;
+   sc.abnormal_spread_points = g_cfg.abnormal_spread_points;
+   string news_why = "";
+   sc.news_clear        = g_news.Clear(TimeCurrent(), news_why);
+   sc.news_reason       = news_why;
+   double bid_s, ask_s;
+   sc.quotes_ok         = g_md.Quotes(bid_s, ask_s);
+   sc.data_ok           = props.valid;
+   sc.symbol_trade_full = (SymbolInfoInteger(g_symbol, SYMBOL_TRADE_MODE)
+                           == SYMBOL_TRADE_MODE_FULL);
+   sc.equity            = rs.equity;
+   sc.margin_ok         = true;   // plan-level margin budget check already passed
+
+   ENUM_XARE_BLOCK_REASON br;
+   string bd;
+   if(!g_safety.Go(sc, br, bd))
+     {
+      g_log.Info("SAFETY", StringFormat("BLOCKED (%s) %s",
+                 XareBlockReasonToString(br), bd));
+      return false;
+     }
+
+   SXareExecutionResult res;
+   if(g_exec.Send(plan, bar_time, res))
+     {
+      g_log.Info("EXEC", StringFormat(
+         "FILLED #%I64u %s vol=%.2f fill=%s slippage=%.1fpt",
+         res.ticket, plan.direction > 0 ? "BUY" : "SELL", plan.volume,
+         DoubleToString(res.fill_price, props.digits), res.slippage_points));
+      g_pos.OnOpened(plan, res, bar_time, regime_label);
+      g_risk.CountTradeOpened();
+      return true;
+     }
+   g_log.Warn("EXEC", StringFormat("send failed: %s", res.comment));
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| M11: manage the open position (pure decisions -> executor).      |
+//+------------------------------------------------------------------+
+void ManagePosition(const ENUM_XARE_REGIME cur_regime,
+                    const int new_signal_direction,
+                    const SXareSymbolProps &props, const SXareFeatures &f)
+  {
+   SXarePosition ctx;
+   if(!g_pos.GetContext(ctx))
+      return;
+   double bid_m, ask_m;
+   if(!g_md.Quotes(bid_m, ask_m))
+      return;
+
+   // §24: optional close at the daily limit (explicit config only; default off)
+   if(g_cfg.close_on_daily_limit && g_risk.DailyLossBreached())
+     {
+      SXareMgmtOrder mo;
+      mo.action       = XARE_MGMT_CLOSE_FULL;
+      mo.close_volume = 0.0;
+      mo.reason       = "DAILY LIMIT: close_on_daily_limit configured";
+      SXareExecutionResult res;
+      if(g_exec.ApplyManagement(mo, g_pos.Ticket(), res))
+        {
+         g_pos.OnManagementApplied(mo.action, mo.reason);
+         g_log.Info("MGMT", StringFormat("CLOSE_FULL #%I64u: %s",
+                    g_pos.Ticket(), mo.reason));
+        }
+      else
+         g_log.Warn("MGMT", StringFormat("daily-limit close failed: %s", res.comment));
+      return;
+     }
+
+   SXareMgmtOrder mgmt = g_exit.Evaluate(ctx, bid_m, ask_m, f.atr, props.point,
+                                         g_cfg.max_bars_in_trade,
+                                         g_cfg.max_hold_minutes,
+                                         cur_regime, new_signal_direction, props);
+   if(mgmt.action == XARE_MGMT_NONE)
+      return;
+   SXareExecutionResult res;
+   if(g_exec.ApplyManagement(mgmt, g_pos.Ticket(), res))
+     {
+      g_pos.OnManagementApplied(mgmt.action, mgmt.reason);
+      g_log.Info("MGMT", StringFormat("%s on #%I64u: %s",
+                 XareMgmtActionToString(mgmt.action), g_pos.Ticket(), mgmt.reason));
+     }
+   else
+      g_log.Warn("MGMT", StringFormat("apply failed: %s", res.comment));
+  }
+
+//+------------------------------------------------------------------+
+//| M11: detect closes, journal them (§69), feed risk stats (§26).   |
+//+------------------------------------------------------------------+
+void CheckPositionClosed(const SXareSymbolProps &props)
+  {
+   SXareExitRecord rec;
+   if(!g_pos.CheckClosed(props, rec) || !rec.present)
+      return;
+   g_log.JournalRow(rec.close_time, rec.ticket,
+                    rec.direction, XareSetupToString(rec.setup), rec.regime,
+                    rec.score, rec.risk_pct, rec.volume,
+                    rec.entry_price, rec.sl_price, rec.tp_price,
+                    rec.exit_price, XareExitToString(rec.reason),
+                    rec.session, rec.pl_money, rec.r_multiple,
+                    rec.bars_in_trade, rec.slippage_points, rec.open_reason);
+   g_risk.OnTradeClosed(rec.pl_money, rec.close_time);
+  }
+
 //+------------------------------------------------------------------+
 void ProcessBar()
   {
@@ -813,6 +1101,12 @@ void ProcessBar()
 
    // --- M8: capture regime for scoring + dashboard ------------------------
    double atr_pct = g_regime.LastATRPercentile();
+
+   // --- M10: protective swing for structural stops -----------------------
+   double swing_lo = (structure.valid && structure.last_swing_low  > 0.0)
+                     ? structure.last_swing_low  : 0.0;
+   double swing_hi = (structure.valid && structure.last_swing_high > 0.0)
+                     ? structure.last_swing_high : 0.0;
    // --- M7: signal evaluation on the same closed-bar context ----------
    double prev_roc = 0.0;
    double c_now  = iClose(g_symbol, _Period, 1);
@@ -820,10 +1114,25 @@ void ProcessBar()
    if(c_prev > 0 && c_now > 0)
       prev_roc = XareRateOfChange(c_now, c_prev);
 
+   // --- M11: manage any open position FIRST (uses this bar's verdicts) --
+   int new_signal_dir = 0;
    SXareDecision decision;
    g_sig.Evaluate(regime, mtf, structure, session, liq, bar, f, prev_roc, decision);
+   new_signal_dir = decision.has_signal ? decision.direction : 0;
    g_last_decision = decision;
    g_have_decision = true;
+   ManagePosition(regime.regime, new_signal_dir, props, f);
+   CheckPositionClosed(props);
+
+   // --- M51: emergency triggers — irreversible, latch and stand down ----
+   int open_cnt_now = g_pos.CountOpen();
+   if(open_cnt_now > g_cfg.max_concurrent_positions)
+      g_safety.ArmEmergency(StringFormat("%d open positions exceeds cap %d",
+                            open_cnt_now, g_cfg.max_concurrent_positions));
+   if(g_exec.ConsecutiveFailures() >= 5)
+      g_safety.ArmEmergency("5+ consecutive execution failures");
+   if(g_have_plan && g_last_plan.volume > g_cfg.emergency_max_lot_x1000 / 1000.0 + 1e-9)
+      g_safety.ArmEmergency("planned volume exceeded the emergency lot ceiling");
 
    // --- M8: score the decision (0–100, every component logged) -----------
    bool have_score = false;
@@ -862,6 +1171,44 @@ void ProcessBar()
          DoubleToString(decision.entry_lo, props.digits),
          DoubleToString(decision.entry_hi, props.digits),
          decision.evidence, decision.invalidation));
+
+      // --- M10: build the fully priced trade plan ------------------------
+      double bid10 = 0.0, ask10 = 0.0;
+      g_md.Quotes(bid10, ask10);
+      double eff_risk = g_risk.Ready() ? g_risk.EffectiveRiskPct()
+                                       : 0.0;   // no risk anchor = no risk
+      SXareRiskSnapshot snap = g_risk.Snapshot();
+      SXareTradeDecision plan;
+      XareBuildTradePlan(decision, score.total, bid10, ask10, props, g_cfg,
+                         snap.state, eff_risk, f.atr, swing_lo, swing_hi,
+                         /*open_positions=*/g_pos.CountOpen(),
+                         /*trades_today=*/
+                         (g_risk.Ready() ? snap.trades_today : 0),
+                         AccountInfoDouble(ACCOUNT_EQUITY),
+                         AccountInfoDouble(ACCOUNT_MARGIN_FREE),
+                         /*margin_per_lot=*/0.0,   // 0 = live OrderCalcMargin
+                         plan);
+      g_last_plan = plan;
+      g_have_plan = true;
+
+      if(plan.actionable)
+        {
+         // --- M12: safety gate, then send (trading modes only) -----------
+         bool sent = TrySendPlan(plan, f.bar_time, props,
+                                 XareRegimeToString(regime.regime));
+         if(!sent)
+            g_log.Info("PLAN", StringFormat(
+               "%s vol=%.2f entry=%s SL=%s (%.0fpt) TP=%s (%.0fpt) R=%.2f risk=%.2f%% ($%.2f) | not sent (mode/gate)",
+               plan.direction > 0 ? "BUY" : "SELL", plan.volume,
+               DoubleToString(plan.entry_price, props.digits),
+               DoubleToString(plan.sl_price, props.digits), plan.sl_points,
+               DoubleToString(plan.tp_price, props.digits), plan.tp_points,
+               plan.planned_r, plan.risk_pct, plan.risk_money));
+        }
+      else if(plan.block_reason != XARE_BR_NONE)
+         g_log.Info("PLAN", StringFormat("BLOCKED (%s) %s",
+                    XareBlockReasonToString(plan.block_reason),
+                    plan.block_detail));
      }
    else
      {
@@ -907,7 +1254,7 @@ void OnTick()
          ? StringFormat("%s %s", g_last_decision.direction > 0 ? "BUY" : "SELL",
                         XareSetupToString(g_last_decision.setup))
          : StringFormat("NO_TRADE(%s)", XareNoTradeToString(g_last_decision.nt_reason));
-   int    open_xare   = 0;   // PositionManager counts by magic from M11
+   int    open_xare   = g_init_ok ? g_pos.CountOpen() : 0;   // M11 live count
    double daily_pl    = 0.0;
    double dd_pct      = 0.0;
    string risk_s      = "N/A";

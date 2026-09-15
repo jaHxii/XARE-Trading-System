@@ -21,7 +21,9 @@ class Props:
     volume_min: float = 0.01
     volume_max: float = 100.0
     volume_step: float = 0.01
+    stops_level: int = 0
     valid: bool = True
+    digits: int = 2
 
 
 GOLD_LIKE = Props()  # 100oz-style synthetic contract

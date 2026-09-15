@@ -422,6 +422,7 @@ struct SXarePosition
    double           score_at_entry;
    ENUM_XARE_SETUP  setup;
    string           session;
+   string           regime;         // regime label at entry (journal context)
    string           open_reason;
    datetime         open_time;
    datetime         open_bar_time;

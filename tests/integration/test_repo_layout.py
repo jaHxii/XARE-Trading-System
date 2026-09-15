@@ -33,6 +33,12 @@ REQUIRED_FILES = [
     "mql5/Include/XARE/LiquidityEngine.mqh",
     "mql5/Include/XARE/SignalEngine.mqh",
     "mql5/Include/XARE/ScoreEngine.mqh",
+    "mql5/Include/XARE/RiskEngine.mqh",
+    "mql5/Include/XARE/ExecutionEngine.mqh",
+    "mql5/Include/XARE/PositionManager.mqh",
+    "mql5/Include/XARE/ExitEngine.mqh",
+    "mql5/Include/XARE/SafetyEngine.mqh",
+    "mql5/Include/XARE/NewsFilter.mqh",
 ]
 
 
@@ -140,16 +146,34 @@ def test_regime_uses_all_spec9_regimes():
 
 
 def test_no_trade_paths_exist():
-    """M1+ invariant: the EA must contain zero order-execution APIs so far."""
+    """M10+ invariant: OrderSend only in ExecutionEngine.mqh; no CTrade
+    wrappers or convenience Buy()/Sell() anywhere."""
     import re
-    for p in (REPO / "mql5").rglob("*.mq5"):
+    for p in list((REPO / "mql5").rglob("*.mq5")) + \
+            list((REPO / "mql5/Include/XARE").rglob("*.mqh")):
         src = p.read_text(encoding="utf-8", errors="replace")
-        assert not re.search(r"OrderSend|CTrade|PositionOpen|PositionClose|"
-                             r"PositionModify", src), f"trade path in {p.name}"
-    for p in (REPO / "mql5/Include/XARE").rglob("*.mqh"):
-        src = p.read_text(encoding="utf-8", errors="replace")
-        assert not re.search(r"OrderSend|CTrade|PositionOpen|PositionClose|"
-                             r"PositionModify", src), f"trade path in {p.name}"
+        assert not re.search(r"\bCTrade\b|\bPositionOpen\b|\bPositionClose\b|\bPositionModify\b",
+                             src), f"trade wrapper in {p.name}"
+        if p.name != "ExecutionEngine.mqh":
+            assert "OrderSend" not in src, \
+                f"{p.name} sends orders outside the execution layer"
+
+
+def test_safety_first_defaults_m9_m12():
+    """M9-M12: trading path defaults must stay conservative (spec §63)."""
+    src = (REPO / "mql5/Include/XARE/Config.mqh").read_text(encoding="utf-8")
+    # one position per symbol (§32), min-lot override off (§49), no close-all
+    assert "c.max_concurrent_positions= 1;" in src
+    assert "c.allow_min_lot_override  = false;" in src
+    assert "c.close_on_daily_limit    = false;" in src
+    # risk limits present and ordered sensibly
+    assert "c.risk_per_trade_pct      = 0.5;" in src
+    assert "c.daily_loss_limit_pct    = 2.0;" in src
+    assert "c.dd_halt_pct             = 15.0;" in src
+    ea = (REPO / "mql5/XARE.mq5").read_text(encoding="utf-8")
+    # trading modes gate on the explicit switch; signal-only default intact
+    assert "ModeAllowsTrading" in ea
+    assert 'InpTradingEnabled  = false' in ea
 
 
 def test_score_weights_sum_to_100_in_config():
